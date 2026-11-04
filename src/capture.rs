@@ -56,6 +56,8 @@ pub struct Pacing {
     pub between_actions: Duration,
     pub between_keys: Duration,
     pub settle: Duration,
+    /// Time for what a click opens to finish appearing before the camera looks for it.
+    pub after_click: Duration,
 }
 
 impl Default for Pacing {
@@ -64,6 +66,7 @@ impl Default for Pacing {
             between_actions: Duration::from_millis(900),
             between_keys: Duration::from_millis(45),
             settle: Duration::from_millis(1_000),
+            after_click: Duration::from_millis(350),
         }
     }
 }
@@ -107,47 +110,51 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     Ok(Recording { video: video.to_path_buf(), size: script.size, fps: script.fps, duration_ms, events })
 }
 
-/// Runs one step and returns what it did on screen, timed by `elapsed`.
+/// Runs one step and returns what it showed on screen, timed by `elapsed`.
 fn perform(
     browser: &mut dyn Browser,
     step: &Step,
     pacing: &Pacing,
     last_action: &mut Instant,
     elapsed: &dyn Fn() -> f64,
-) -> Result<Option<Event>> {
+) -> Result<Vec<Event>> {
     match step {
         Step::Click { target } => {
-            let (rect, selector) = locate(browser, target)?;
+            let found = locate(browser, target)?;
             sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
-            let event = Event::Click { at_ms: elapsed(), target: rect };
-            browser.run(&["click", &selector], None)?;
+            let mut events = vec![Event::Click { at_ms: elapsed(), target: found.target, frame: found.frame }];
+            browser.run(&["click", &found.selector], None)?;
             *last_action = Instant::now();
-            Ok(Some(event))
+            sleep(pacing.after_click);
+            if let Some(frame) = open_overlay(browser)? {
+                events.push(Event::Focus { at_ms: elapsed(), frame });
+            }
+            Ok(events)
         }
         Step::Type { target, text } => {
-            let (rect, selector) = locate(browser, target)?;
+            let found = locate(browser, target)?;
             sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
             let at_ms = elapsed();
-            browser.run(&["click", &selector], None)?;
+            browser.run(&["click", &found.selector], None)?;
             for character in text.chars() {
-                browser.run(&["type", &selector, &character.to_string()], None)?;
+                browser.run(&["type", &found.selector, &character.to_string()], None)?;
                 sleep(pacing.between_keys);
             }
             *last_action = Instant::now();
-            Ok(Some(Event::Type { at_ms, until_ms: elapsed(), target: rect }))
+            Ok(vec![Event::Type { at_ms, until_ms: elapsed(), target: found.target, frame: found.frame }])
         }
         Step::Pause { ms } => {
             let at_ms = elapsed();
             sleep(Duration::from_millis(*ms));
-            Ok(Some(Event::Pause { at_ms, until_ms: elapsed() }))
+            Ok(vec![Event::Pause { at_ms, until_ms: elapsed() }])
         }
         Step::WaitFor { target } => {
-            locate(browser, target)?;
-            Ok(None)
+            let found = locate(browser, target)?;
+            Ok(vec![Event::Focus { at_ms: elapsed(), frame: found.frame }])
         }
         Step::Goto { url } => {
             navigate(browser, &["open", url])?;
-            Ok(None)
+            Ok(vec![])
         }
     }
 }
@@ -215,23 +222,36 @@ fn navigate(browser: &mut dyn Browser, args: &[&str]) -> Result<()> {
     }
 }
 
+struct Located {
+    target: Rect,
+    frame: Rect,
+    selector: String,
+}
+
+fn rect_from(value: &Value) -> Option<Rect> {
+    Some(Rect { x: value["x"].as_f64()?, y: value["y"].as_f64()?, w: value["w"].as_f64()?, h: value["h"].as_f64()? })
+}
+
 /// Finds a visible element, scrolls it into view, tags it so the click hits that same element,
-/// and returns where it sits in the viewport.
-fn locate(browser: &mut dyn Browser, target: &str) -> Result<(Rect, String)> {
+/// and returns where it sits in the viewport and the container worth keeping in view around it.
+fn locate(browser: &mut dyn Browser, target: &str) -> Result<Located> {
     let script = format!("({LOCATE_JS})({})", serde_json::to_string(target)?);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let found = &browser.run(&["eval", "--stdin"], Some(&script))?["result"];
-        if let (Some(id), Some(x), Some(y), Some(w), Some(h)) =
-            (found["id"].as_str(), found["x"].as_f64(), found["y"].as_f64(), found["w"].as_f64(), found["h"].as_f64())
-        {
-            return Ok((Rect { x, y, w, h }, format!("[data-reel=\"{id}\"]")));
+        if let (Some(id), Some(rect), Some(frame)) = (found["id"].as_str(), rect_from(found), rect_from(&found["frame"])) {
+            return Ok(Located { target: rect, frame, selector: format!("[data-reel=\"{id}\"]") });
         }
         if Instant::now() > deadline {
             bail!("no visible element for {target}");
         }
         sleep(Duration::from_millis(150));
     }
+}
+
+fn open_overlay(browser: &mut dyn Browser) -> Result<Option<Rect>> {
+    let found = browser.run(&["eval", "--stdin"], Some(&format!("({OVERLAY_JS})()")))?;
+    Ok(rect_from(&found["result"]))
 }
 
 const LOCATE_JS: &str = r#"(target) => {
@@ -250,8 +270,28 @@ const LOCATE_JS: &str = r#"(target) => {
   el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   const id = Math.random().toString(36).slice(2, 10);
   el.setAttribute('data-reel', id);
-  const r = el.getBoundingClientRect();
-  return { id, x: r.x, y: r.y, w: r.width, h: r.height };
+  const box = (r) => ({ x: r.x, y: r.y, w: r.width, h: r.height });
+  const own = el.getBoundingClientRect();
+  const frameOf = () => {
+    const layer = el.closest('dialog, [role=dialog], [role=alertdialog], [role=menu], [role=listbox]');
+    if (layer) return layer.getBoundingClientRect();
+    for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+      const r = a.getBoundingClientRect();
+      if (r.width > innerWidth * 0.7 || r.height > innerHeight * 0.7) break;
+      if (r.width >= Math.max(300, own.width * 2)) return r;
+    }
+    return own;
+  };
+  return { id, ...box(own), frame: box(frameOf()) };
+}"#;
+
+const OVERLAY_JS: &str = r#"() => {
+  const layers = [...document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [role=menu], [role=listbox]')]
+    .filter((el) => el.getClientRects().length > 0);
+  const top = layers[layers.length - 1];
+  if (!top) return null;
+  const r = top.getBoundingClientRect();
+  return r.width < 40 || r.height < 40 ? null : { x: r.x, y: r.y, w: r.width, h: r.height };
 }"#;
 
 /// The recorder starts before its command returns, so events trail the video by that delay.
@@ -271,16 +311,27 @@ mod tests {
     struct FakeBrowser {
         commands: Vec<String>,
         slow_pages: bool,
+        overlay: Option<Value>,
     }
 
+    const TARGET: Rect = Rect { x: 10.0, y: 20.0, w: 100.0, h: 30.0 };
+    const ROW: Rect = Rect { x: 0.0, y: 10.0, w: 700.0, h: 60.0 };
+
     impl Browser for FakeBrowser {
-        fn run(&mut self, args: &[&str], _stdin: Option<&str>) -> Result<Value> {
+        fn run(&mut self, args: &[&str], stdin: Option<&str>) -> Result<Value> {
             self.commands.push(args.join(" "));
             if self.slow_pages && args.contains(&"open") {
                 bail!("Operation timed out. The page may still be loading or the element may not exist.");
             }
             if args[0] == "eval" {
-                return Ok(json!({ "result": { "id": "abc", "x": 10.0, "y": 20.0, "w": 100.0, "h": 30.0 } }));
+                if !stdin.unwrap_or_default().contains("data-reel") {
+                    return Ok(json!({ "result": self.overlay.clone() }));
+                }
+                return Ok(json!({ "result": {
+                    "id": "abc",
+                    "x": TARGET.x, "y": TARGET.y, "w": TARGET.w, "h": TARGET.h,
+                    "frame": { "x": ROW.x, "y": ROW.y, "w": ROW.w, "h": ROW.h },
+                } }));
             }
             Ok(json!({}))
         }
@@ -291,7 +342,7 @@ mod tests {
     }
 
     fn no_pacing() -> Pacing {
-        Pacing { between_actions: Duration::ZERO, between_keys: Duration::ZERO, settle: Duration::ZERO }
+        Pacing { between_actions: Duration::ZERO, between_keys: Duration::ZERO, settle: Duration::ZERO, after_click: Duration::ZERO }
     }
 
     #[test]
@@ -305,9 +356,8 @@ mod tests {
 
         let recording = capture(&script(steps), &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
 
-        let target = Rect { x: 10.0, y: 20.0, w: 100.0, h: 30.0 };
-        assert!(matches!(recording.events[0], Event::Click { target: t, .. } if t == target));
-        assert!(matches!(recording.events[1], Event::Type { target: t, .. } if t == target));
+        assert!(matches!(recording.events[0], Event::Click { target, frame, .. } if target == TARGET && frame == ROW));
+        assert!(matches!(recording.events[1], Event::Type { target, frame, .. } if target == TARGET && frame == ROW));
         assert!(matches!(recording.events[2], Event::Pause { .. }));
         let clicks: Vec<&String> = browser.commands.iter().filter(|c| c.starts_with("click")).collect();
         assert_eq!(clicks, ["click [data-reel=\"abc\"]", "click [data-reel=\"abc\"]"]);
@@ -316,6 +366,42 @@ mod tests {
         let stop = browser.commands.iter().position(|c| c == "record stop").unwrap();
         let click = browser.commands.iter().position(|c| c.starts_with("click")).unwrap();
         assert!(start < click && click < stop);
+    }
+
+    #[test]
+    fn focuses_on_a_dialog_that_a_click_opened() {
+        let mut browser = FakeBrowser {
+            overlay: Some(json!({ "x": 700.0, "y": 300.0, "w": 500.0, "h": 400.0 })),
+            ..FakeBrowser::default()
+        };
+        let steps = vec![Step::Click { target: "#open".into() }];
+
+        let recording = capture(&script(steps), &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
+
+        let dialog = Rect { x: 700.0, y: 300.0, w: 500.0, h: 400.0 };
+        assert!(matches!(recording.events[0], Event::Click { .. }));
+        assert!(matches!(recording.events[1], Event::Focus { frame, .. } if frame == dialog));
+        assert_eq!(recording.events.len(), 2);
+    }
+
+    #[test]
+    fn logs_no_focus_when_a_click_opened_nothing() {
+        let mut browser = FakeBrowser::default();
+        let steps = vec![Step::Click { target: "#go".into() }];
+
+        let recording = capture(&script(steps), &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
+
+        assert_eq!(recording.events.len(), 1);
+    }
+
+    #[test]
+    fn focuses_on_what_the_script_waited_for() {
+        let mut browser = FakeBrowser::default();
+        let steps = vec![Step::WaitFor { target: "#result".into() }];
+
+        let recording = capture(&script(steps), &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
+
+        assert!(matches!(recording.events[0], Event::Focus { frame, .. } if frame == ROW));
     }
 
     #[test]
@@ -385,12 +471,12 @@ mod tests {
             size: [1920, 1080],
             fps: 60,
             duration_ms: 10_000.0,
-            events: vec![Event::Click { at_ms: 2_000.0, target }],
+            events: vec![Event::Click { at_ms: 2_000.0, target, frame: target }],
         };
 
         align_to_video(&mut recording, 10_300.0);
 
-        assert_eq!(recording.events, vec![Event::Click { at_ms: 2_300.0, target }]);
+        assert_eq!(recording.events, vec![Event::Click { at_ms: 2_300.0, target, frame: target }]);
         assert_eq!(recording.duration_ms, 10_300.0);
     }
 }

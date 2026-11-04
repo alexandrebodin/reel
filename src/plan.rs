@@ -45,6 +45,8 @@ pub struct Ripple {
 
 const ZOOM_IN_LEAD_MS: f64 = 900.0;
 const SETTLE_MS: f64 = 150.0;
+const FOCUS_PAN_MS: f64 = 600.0;
+const FIT_MARGIN: f64 = 1.25;
 const PAN_LEAD_MS: f64 = 650.0;
 const HOLD_MS: f64 = 1_200.0;
 const ZOOM_OUT_MS: f64 = 1_000.0;
@@ -81,19 +83,21 @@ struct Move {
 
 impl Plan {
     pub fn new(events: &[Event], duration_ms: f64, frame: Size) -> Plan {
-        let mut focus: Vec<(&Event, Rect)> = events.iter().filter_map(|e| e.target().map(|r| (e, r))).collect();
+        let mut focus: Vec<(&Event, Rect)> = events.iter().filter_map(|e| e.camera_frame().map(|r| (e, r))).collect();
         focus.sort_by(|a, b| a.0.at_ms().total_cmp(&b.0.at_ms()));
+        let mut cursor: Vec<(&Event, Rect)> = events.iter().filter_map(|e| e.cursor_target().map(|r| (e, r))).collect();
+        cursor.sort_by(|a, b| a.0.at_ms().total_cmp(&b.0.at_ms()));
         let cursor_start = (frame.w * 0.62, frame.h * 0.72);
         Plan {
             frame,
             time: TimeMap::new(events, duration_ms),
             camera: camera_keys(&focus, frame),
             cursor_start,
-            moves: cursor_moves(&focus, cursor_start),
+            moves: cursor_moves(&cursor, cursor_start),
             clicks: events
                 .iter()
                 .filter_map(|e| match e {
-                    Event::Click { at_ms, target } => Some((*at_ms, target.center())),
+                    Event::Click { at_ms, target, .. } => Some((*at_ms, target.center())),
                     _ => None,
                 })
                 .collect(),
@@ -148,7 +152,7 @@ fn overview(frame: Size) -> View {
 }
 
 fn focus_view(target: Rect, frame: Size) -> View {
-    let zoom = (frame.w / (target.w * 2.5)).min(frame.h / (target.h * 8.0)).clamp(1.0, MAX_ZOOM);
+    let zoom = (frame.w / (target.w * FIT_MARGIN)).min(frame.h / (target.h * FIT_MARGIN)).clamp(1.0, MAX_ZOOM);
     let (w, h) = (frame.w / zoom, frame.h / zoom);
     let (cx, cy) = target.center();
     View { x: (cx - w / 2.0).clamp(0.0, frame.w - w), y: (cy - h / 2.0).clamp(0.0, frame.h - h), w, h }
@@ -159,18 +163,29 @@ fn camera_keys(focus: &[(&Event, Rect)], frame: Size) -> Vec<(f64, View)> {
     for cluster in clusters(focus) {
         let (first, first_target) = cluster[0];
         let current = keys[keys.len() - 1].1;
-        push_key(&mut keys, first.at_ms() - ZOOM_IN_LEAD_MS, current);
-        push_key(&mut keys, first.at_ms() - SETTLE_MS, focus_view(first_target, frame));
+        let (start_ms, settled_ms) = move_window(first, ZOOM_IN_LEAD_MS);
+        push_key(&mut keys, start_ms, current);
+        push_key(&mut keys, settled_ms, focus_view(first_target, frame));
         for pair in cluster.windows(2) {
             let ((_, previous), (next, next_target)) = (pair[0], pair[1]);
-            push_key(&mut keys, next.at_ms() - PAN_LEAD_MS, focus_view(previous, frame));
-            push_key(&mut keys, next.at_ms() - SETTLE_MS, focus_view(next_target, frame));
+            let (start_ms, settled_ms) = move_window(next, PAN_LEAD_MS);
+            push_key(&mut keys, start_ms, focus_view(previous, frame));
+            push_key(&mut keys, settled_ms, focus_view(next_target, frame));
         }
         let (last, last_target) = cluster[cluster.len() - 1];
         push_key(&mut keys, last.until_ms() + HOLD_MS, focus_view(last_target, frame));
         push_key(&mut keys, last.until_ms() + HOLD_MS + ZOOM_OUT_MS, overview(frame));
     }
     keys
+}
+
+/// The camera anticipates an action, so it is there when the click lands, but only reacts to
+/// something that appeared: it cannot know before the dialog is on screen.
+fn move_window(event: &Event, lead_ms: f64) -> (f64, f64) {
+    match event {
+        Event::Focus { at_ms, .. } => (*at_ms, at_ms + FOCUS_PAN_MS),
+        _ => (event.at_ms() - lead_ms, event.at_ms() - SETTLE_MS),
+    }
 }
 
 fn clusters<'a>(focus: &'a [(&'a Event, Rect)]) -> Vec<&'a [(&'a Event, Rect)]> {
@@ -366,7 +381,7 @@ mod tests {
     const BUTTON: Rect = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
 
     fn click(at_ms: f64, target: Rect) -> Event {
-        Event::Click { at_ms, target }
+        Event::Click { at_ms, target, frame: target }
     }
 
     fn close(a: f64, b: f64) -> bool {
@@ -382,6 +397,37 @@ mod tests {
         assert!(close(view.zoom(FRAME), MAX_ZOOM), "zoom was {}", view.zoom(FRAME));
         let (cx, cy) = view.center();
         assert!(close(cx, 950.0) && close(cy, 516.0), "centered on ({cx}, {cy})");
+    }
+
+    #[test]
+    fn keeps_the_row_of_a_clicked_control_in_view() {
+        let menu_button = Rect { x: 1425.0, y: 485.0, w: 32.0, h: 32.0 };
+        let row = Rect { x: 704.0, y: 472.0, w: 768.0, h: 58.0 };
+        let plan = Plan::new(&[Event::Click { at_ms: 2_000.0, target: menu_button, frame: row }], 6_000.0, FRAME);
+
+        let view = plan.camera_at(2_000.0);
+
+        assert!(view.zoom(FRAME) > 1.5);
+        assert!(view.x <= row.x && view.x + view.w >= row.x + row.w, "row cut off by {view:?}");
+        let (cx, _) = view.center();
+        assert!(close(cx, 1_088.0), "centered on {cx}, not the row");
+        assert!(close(plan.cursor_at(2_000.0).x, 1_441.0), "the cursor still goes to the button");
+    }
+
+    #[test]
+    fn fits_a_dialog_that_opens_after_a_click_without_moving_the_cursor() {
+        let dialog = Rect { x: 1_250.0, y: 120.0, w: 520.0, h: 480.0 };
+        let events = [click(2_000.0, BUTTON), Event::Focus { at_ms: 2_350.0, frame: dialog }];
+        let plan = Plan::new(&events, 8_000.0, FRAME);
+
+        let view = plan.camera_at(3_200.0);
+
+        assert!(view.zoom(FRAME) > 1.3, "zoom was {}", view.zoom(FRAME));
+        assert!(view.y <= dialog.y && view.y + view.h >= dialog.y + dialog.h, "dialog cut off by {view:?}");
+        assert!(view.x <= dialog.x && view.x + view.w >= dialog.x + dialog.w, "dialog cut off by {view:?}");
+        assert!(close(plan.cursor_at(3_200.0).x, 950.0), "the cursor moved to the dialog");
+        let (cx, _) = plan.camera_at(2_100.0).center();
+        assert!(close(cx, 950.0), "the camera left the click before the dialog appeared");
     }
 
     #[test]
@@ -493,7 +539,7 @@ mod tests {
     #[test]
     fn keeps_short_typing_at_real_speed() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
-        let events = [Event::Type { at_ms: 1_000.0, until_ms: 1_900.0, target: field }];
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 1_900.0, target: field, frame: field }];
         let plan = Plan::new(&events, 4_000.0, FRAME);
 
         assert!(close(plan.time.output_duration_ms(), 4_000.0), "output was {}", plan.time.output_duration_ms());
@@ -502,7 +548,7 @@ mod tests {
     #[test]
     fn plays_typing_faster() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
-        let events = [Event::Type { at_ms: 1_000.0, until_ms: 6_000.0, target: field }];
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 6_000.0, target: field, frame: field }];
         let plan = Plan::new(&events, 9_000.0, FRAME);
 
         assert!(plan.time.output_duration_ms() < 8_000.0, "output was {}", plan.time.output_duration_ms());
