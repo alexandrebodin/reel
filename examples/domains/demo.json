@@ -1,0 +1,13 @@
+{
+  "url": "page.html",
+  "steps": [
+    { "do": "pause", "ms": 800 },
+    { "do": "click", "target": "text=Add domain" },
+    { "do": "type", "target": "#hostname", "text": "shop.acme.com" },
+    { "do": "click", "target": "text=Add" },
+    { "do": "wait_for", "target": "#verified" },
+    { "do": "pause", "ms": 1200 },
+    { "do": "click", "target": "text=Verify" },
+    { "do": "pause", "ms": 1500 }
+  ]
+}

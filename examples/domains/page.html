@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Domains</title>
+<style>
+  :root { font-family: Inter, system-ui, sans-serif; color: #18181b; background: #fafafa; }
+  body { margin: 0; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 18px 32px; border-bottom: 1px solid #e4e4e7; background: #fff; }
+  header strong { font-size: 18px; }
+  main { max-width: 860px; margin: 48px auto; }
+  h1 { font-size: 32px; font-weight: 600; margin: 0 0 24px; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 16px 20px; margin-bottom: 10px; border-radius: 14px; background: #f1f1f3; }
+  .row .host { font-weight: 600; flex: 1; }
+  .badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: #fff; border: 1px solid #e4e4e7; }
+  .pending { color: #71717a; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 9px 16px; cursor: pointer; background: #e4e4e7; }
+  button.primary { background: #e2581f; color: #fff; }
+  dialog { border: 0; border-radius: 18px; padding: 28px; width: 420px; box-shadow: 0 24px 80px rgba(0,0,0,.25); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  input { font: inherit; width: 100%; box-sizing: border-box; padding: 11px 13px; border-radius: 10px; border: 1px solid #d4d4d8; margin: 14px 0 18px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; }
+</style>
+</head>
+<body>
+<header><strong>Acme</strong><button class="primary" id="add">Add domain</button></header>
+<main>
+  <h1>Domains</h1>
+  <div id="rows">
+    <div class="row"><span class="host">www.acme.com</span><span class="badge">Primary</span><span>Serves the site</span></div>
+    <div class="row"><span class="host">acme.com</span><span>↳ 308 www.acme.com</span></div>
+  </div>
+</main>
+<dialog id="dialog">
+  <strong>Add a domain</strong>
+  <input id="hostname" placeholder="e.g. shop.acme.com">
+  <div class="actions"><button id="cancel">Cancel</button><button class="primary" id="confirm">Add</button></div>
+</dialog>
+<script>
+  const dialog = document.getElementById('dialog');
+  document.getElementById('add').onclick = () => dialog.showModal();
+  document.getElementById('cancel').onclick = () => dialog.close();
+  document.getElementById('confirm').onclick = () => {
+    const host = document.getElementById('hostname').value;
+    dialog.close();
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<span class="host">${host}</span><span class="pending" id="status">Checking DNS…</span><button id="verify">Verify</button>`;
+    document.getElementById('rows').append(row);
+    setTimeout(() => { document.getElementById('status').textContent = 'Verified'; document.getElementById('status').id = 'verified'; }, 5000);
+  };
+</script>
+</body>
+</html>
