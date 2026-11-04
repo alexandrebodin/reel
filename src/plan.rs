@@ -53,6 +53,7 @@ const MIN_ZOOM_STAY_MS: f64 = 700.0;
 const CLUSTER_GAP_MS: f64 = 2_500.0;
 const LAST_FRAME_MS: f64 = 200.0;
 const CURSOR_TRAVEL_MS: f64 = 650.0;
+const MIN_CURSOR_TRAVEL_MS: f64 = 80.0;
 const CURSOR_ARRIVES_EARLY_MS: f64 = 120.0;
 const PRESS_LEAD_MS: f64 = 60.0;
 const PRESS_MS: f64 = 140.0;
@@ -200,14 +201,14 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         }
         if let Some(target) = event.cursor_target() {
             let to = target.center();
-            if travel_ms < arrive_ms && position != to {
-                moves.push(Move { start_ms: travel_ms, end_ms: arrive_ms, from: position, to });
+            if position != to {
+                moves.push(Move { start_ms: travel_ms.min(arrive_ms - MIN_CURSOR_TRAVEL_MS), end_ms: arrive_ms, from: position, to });
             }
             position = to;
         }
-        free_from = attention_end(event, &pauses);
-
         let next = actions.get(i + 1).copied();
+        free_from = attention_end(event, next, &pauses);
+
         if let Some(rect) = event.camera_frame() {
             let view = focus_view(rect, frame);
             let wanted = camera.shown == wide || !in_view(camera.shown, rect);
@@ -252,10 +253,12 @@ fn pauses(events: &[Event]) -> Vec<(f64, f64)> {
 }
 
 /// When the viewer stops looking at an action: a scripted pause right after it is reading time.
-fn attention_end(event: &Event, pauses: &[(f64, f64)]) -> f64 {
+/// A pause after the next action belongs to that action.
+fn attention_end(event: &Event, next: Option<&Event>, pauses: &[(f64, f64)]) -> f64 {
+    let next_ms = next.map_or(f64::INFINITY, Event::at_ms);
     pauses
         .iter()
-        .filter(|(start, _)| *start >= event.at_ms())
+        .filter(|(start, _)| *start >= event.at_ms() && *start < next_ms)
         .fold(event.until_ms(), |end, (start, until)| if start - end <= CLUSTER_GAP_MS { end.max(*until) } else { end })
 }
 
@@ -558,6 +561,29 @@ mod tests {
         let start = plan.cursor_at(0.0);
         let travelling = plan.cursor_at(1_600.0);
         assert!(travelling != start && (travelling.x, travelling.y) != (at_click.x, at_click.y));
+    }
+
+    #[test]
+    fn has_the_cursor_on_the_target_at_every_click() {
+        let a = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
+        let b = Rect { x: 1_200.0, y: 760.0, w: 60.0, h: 32.0 };
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let timelines = [
+            vec![click(2_000.0, a), click(3_300.0, b), Event::Pause { at_ms: 3_400.0, until_ms: 5_000.0 }],
+            vec![click(2_000.0, a), Event::Pause { at_ms: 2_100.0, until_ms: 4_000.0 }, click(4_050.0, far)],
+            vec![click(2_000.0, a), click(2_300.0, far), click(2_600.0, b)],
+        ];
+
+        for events in timelines {
+            let plan = Plan::new(&events, 9_000.0, FRAME);
+            for event in &events {
+                if let Event::Click { at_ms, target, .. } = event {
+                    let (x, y) = target.center();
+                    let cursor = plan.cursor_at(*at_ms);
+                    assert!(close(cursor.x, x) && close(cursor.y, y), "{cursor:?} at the click on {target:?} in {events:?}");
+                }
+            }
+        }
     }
 
     #[test]
