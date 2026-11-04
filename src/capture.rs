@@ -146,10 +146,12 @@ fn perform(
         Step::Pause { ms } => {
             let at_ms = elapsed();
             sleep(Duration::from_millis(*ms));
+            *last_action = Instant::now();
             Ok(vec![Event::Pause { at_ms, until_ms: elapsed() }])
         }
         Step::WaitFor { target } => {
             let found = locate(browser, target)?;
+            *last_action = Instant::now();
             Ok(vec![Event::Focus { at_ms: elapsed(), frame: found.frame }])
         }
         Step::Goto { url } => {
@@ -366,6 +368,20 @@ mod tests {
         let stop = browser.commands.iter().position(|c| c == "record stop").unwrap();
         let click = browser.commands.iter().position(|c| c.starts_with("click")).unwrap();
         assert!(start < click && click < stop);
+    }
+
+    #[test]
+    fn leaves_the_cursor_time_to_travel_after_a_pause_or_a_wait() {
+        for step in [Step::Pause { ms: 1 }, Step::WaitFor { target: "#done".into() }] {
+            let mut browser = FakeBrowser::default();
+            let pacing = Pacing { between_actions: Duration::from_millis(60), ..no_pacing() };
+            let steps = vec![step, Step::Click { target: "#go".into() }];
+
+            let recording = capture(&script(steps), &mut browser, Path::new("/tmp/raw.webm"), &pacing).unwrap();
+
+            let gap = recording.events[1].at_ms() - recording.events[0].until_ms();
+            assert!(gap >= 50.0, "the click came {gap}ms after {:?}", recording.events[0]);
+        }
     }
 
     #[test]
