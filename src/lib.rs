@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::thread;
 
 use anyhow::{bail, Result};
 
@@ -60,13 +61,25 @@ pub fn render_file(recording_path: &Path, output: Option<PathBuf>, style_overrid
     Ok(output)
 }
 
-/// Opens a recording or any video in the editor and serves it until the process ends.
-pub fn edit(path: &Path, open_browser: bool) -> Result<()> {
+/// Opens a recording, or makes a project for any other video.
+pub fn open_editor(path: &Path) -> Result<Editor> {
     let is_recording = path.extension().is_some_and(|e| e == "json");
     let recording = if is_recording { path.to_path_buf() } else { motion::import(path)? };
-    let editor = Arc::new(Editor::open(&recording)?);
+    Editor::open(&recording)
+}
+
+/// Serves an editor on a free local port until the process ends, and returns its address.
+pub fn serve_editor(editor: Editor) -> Result<String> {
+    let editor = Arc::new(editor);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let url = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
+    thread::spawn(move || server::serve(listener, Arc::new(move |request| editor.handle(request))));
+    Ok(url)
+}
+
+/// Opens a recording or any video in the editor, in the browser, until the process ends.
+pub fn edit(path: &Path, open_browser: bool) -> Result<()> {
+    let url = serve_editor(open_editor(path)?)?;
     println!("{url}");
     if open_browser {
         let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
@@ -74,8 +87,9 @@ pub fn edit(path: &Path, open_browser: bool) -> Result<()> {
             eprintln!("reel: could not open a browser ({error}): go to {url}");
         }
     }
-    server::serve(listener, Arc::new(move |request| editor.handle(request)))?;
-    Ok(())
+    loop {
+        thread::park();
+    }
 }
 
 #[cfg(test)]

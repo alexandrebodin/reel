@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { MousePointerClickIcon, PlusIcon, TimerIcon, ZoomInIcon, type LucideIcon } from "lucide-react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -8,7 +9,6 @@ import { cn } from "@/lib/utils"
 import { addClick, addSpeed, addZoom, clamp, clickAt, dragged, timecode, type SpanPart } from "./edits"
 import { player } from "./player"
 import { beginDrag, dragTimeline, editTimeline, finishDrag, getState, select, useEditor } from "./store"
-import { toast } from "sonner"
 
 const EDGE_PX = 8
 
@@ -135,7 +135,7 @@ export function TimelinePanel() {
   if (!project || !timeline) return <div className="h-48 border-t" />
 
   return (
-    <div className="flex shrink-0 border-t bg-card select-none">
+    <div className="flex shrink-0 border-t bg-card">
       <div className="flex w-28 shrink-0 flex-col border-r text-xs text-muted-foreground">
         <div className="h-7" />
         <div className="flex h-11 items-center px-3">Video</div>

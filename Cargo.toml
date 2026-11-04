@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "app/src-tauri"]
+default-members = ["."]
+
 [package]
 name = "reel"
 version = "0.1.0"

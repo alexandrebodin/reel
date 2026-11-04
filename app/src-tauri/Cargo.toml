@@ -1,0 +1,14 @@
+[package]
+name = "reel-app"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop editor for reel"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+reel = { path = "../.." }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
