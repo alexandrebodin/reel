@@ -26,6 +26,7 @@ const STRIP_HEIGHT: u32 = 54;
 /// One recording open for editing. Owns its state: every change goes through `handle`, reaches
 /// disk before it is answered, and a new generation tells the page its images are stale.
 pub struct Editor {
+    image_picker: Option<ImagePicker>,
     path: PathBuf,
     preview: PathBuf,
     strip: PathBuf,
@@ -34,6 +35,9 @@ pub struct Editor {
     source_frame: Mutex<Option<(i64, Arc<Pixmap>)>>,
     job: Arc<Mutex<RenderJob>>,
 }
+
+/// Asks the person for an image file. A browser cannot give the page a file's path, a desktop shell can.
+pub type ImagePicker = Box<dyn Fn() -> Option<PathBuf> + Send + Sync>;
 
 struct Working {
     recording: Recording,
@@ -128,7 +132,12 @@ impl Editor {
             make_preview(&recording, &preview, &strip)?;
         }
         let working = Working::new(recording, 1)?;
-        Ok(Editor { render_output: dir.join("render.mp4"), path, preview, strip, working: Mutex::new(working), source_frame: Mutex::new(None), job: Arc::default() })
+        Ok(Editor { image_picker: None, render_output: dir.join("render.mp4"), path, preview, strip, working: Mutex::new(working), source_frame: Mutex::new(None), job: Arc::default() })
+    }
+
+    pub fn with_image_picker(mut self, picker: ImagePicker) -> Editor {
+        self.image_picker = Some(picker);
+        self
     }
 
     pub fn handle(&self, request: &Request) -> Response {
@@ -141,7 +150,7 @@ impl Editor {
     fn route(&self, request: &Request) -> Result<Response> {
         Ok(match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/") => Response::bytes("text/html; charset=utf-8", PAGE.as_bytes().to_vec()),
-            ("GET", "/api/project") => json_response(self.lock().project()),
+            ("GET", "/api/project") => json_response(self.project(&self.lock())),
             ("POST", "/api/edit") => {
                 let edit: Edit = serde_json::from_slice(&request.body).context("reading the edit")?;
                 let duration_ms = self.lock().recording.duration_ms;
@@ -158,6 +167,11 @@ impl Editor {
                 self.apply(|recording| recording.timeline = guess)?
             }
             ("POST", "/api/render") => self.start_render()?,
+            ("POST", "/api/reveal") => self.reveal_render()?,
+            ("POST", "/api/pick-image") => {
+                let picker = self.image_picker.as_ref().context("choosing a file needs the desktop app")?;
+                json_response(json!({ "path": picker() }))
+            }
             ("GET", "/api/render") => {
                 let job = self.job.lock().expect("render job");
                 json_response(json!({ "running": job.running, "progress": job.progress, "finished": job.finished, "error": job.error, "output": self.render_output }))
@@ -194,7 +208,26 @@ impl Editor {
         let next = Working::new(recording, working.generation + 1)?;
         write_atomically(&self.path, serde_json::to_string_pretty(&next.recording)?.as_bytes())?;
         *working = next;
-        Ok(json_response(working.project()))
+        Ok(json_response(self.project(&working)))
+    }
+
+    fn project(&self, working: &Working) -> Value {
+        let mut project = working.project();
+        project["can_pick"] = json!(self.image_picker.is_some());
+        project
+    }
+
+    fn reveal_render(&self) -> Result<Response> {
+        if !self.render_output.exists() {
+            bail!("nothing has been rendered yet");
+        }
+        let opened = if cfg!(target_os = "macos") {
+            Command::new("open").arg("-R").arg(&self.render_output).status()
+        } else {
+            Command::new("xdg-open").arg(self.render_output.parent().context("the render has no folder")?).status()
+        };
+        opened.context("opening the folder")?;
+        Ok(json_response(json!({})))
     }
 
     fn exact_png(&self, source_ms: f64) -> Result<Vec<u8>> {
@@ -468,7 +501,7 @@ mod tests {
     fn serves_the_page_the_preview_the_strip_and_the_drawing_parts() {
         let editor = Editor::open(&take("assets")).unwrap();
 
-        assert!(String::from_utf8_lossy(bytes(&get(&editor, "/"))).contains("<canvas"));
+        assert!(String::from_utf8_lossy(bytes(&get(&editor, "/"))).contains("id=\"root\""));
         for (target, kind) in [("/video", "video/mp4"), ("/strip.jpg", "image/jpeg")] {
             let reply = get(&editor, target);
             let Body::File(path) = &reply.body else { panic!("{target} is not a file") };
@@ -480,6 +513,28 @@ mod tests {
         assert_ne!(bytes(&get(&editor, "/sprite.png?pointer=hand")), bytes(&get(&editor, "/sprite.png")));
         assert_eq!(get(&editor, "/nothing").status, 404);
         assert_eq!(get(&editor, "/output.mp4").status, 404, "offered a render before there was one");
+    }
+
+    #[test]
+    fn asks_the_picker_for_an_image_and_says_when_there_is_none() {
+        let path = take("picker");
+        let plain = Editor::open(&path).unwrap();
+        assert_eq!(json_of(&get(&plain, "/api/project"))["can_pick"], false);
+        assert_eq!(post(&plain, "/api/pick-image", json!({})).status, 400);
+
+        let chosen = Editor::open(&path).unwrap().with_image_picker(Box::new(|| Some(PathBuf::from("/walls/sea.jpg"))));
+        assert_eq!(json_of(&get(&chosen, "/api/project"))["can_pick"], true);
+        assert_eq!(json_of(&post(&chosen, "/api/pick-image", json!({})))["path"], "/walls/sea.jpg");
+
+        let cancelled = Editor::open(&path).unwrap().with_image_picker(Box::new(|| None));
+        assert!(json_of(&post(&cancelled, "/api/pick-image", json!({})))["path"].is_null());
+    }
+
+    #[test]
+    fn says_when_there_is_no_render_to_show() {
+        let editor = Editor::open(&take("noreveal")).unwrap();
+
+        assert_eq!(post(&editor, "/api/reveal", json!({})).status, 400);
     }
 
     #[test]
