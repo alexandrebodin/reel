@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::style::Style;
+use crate::style::{Fill, Style};
 
 /// A demo to record, read from a JSON file.
 #[derive(Debug, Deserialize)]
@@ -64,6 +64,9 @@ impl Script {
             }
         }
         script.state = script.state.map(|state| base.join(state));
+        if let Fill::Image(image) = &mut script.style.background.fill {
+            *image = base.join(&*image);
+        }
         script.style = script.style.validated().with_context(|| format!("reading the style of {}", path.display()))?;
         Ok(script)
     }

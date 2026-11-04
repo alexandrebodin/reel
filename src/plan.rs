@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn zooms_as_far_as_the_style_asks() {
-        let style = Style { zoom: Zoom { level: 1.2 } };
+        let style = Style { zoom: Zoom { level: 1.2 }, ..Style::default() };
         let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &style);
 
         assert!(close(plan.camera_at(3_000.0).zoom(FRAME), 1.2), "zoom was {}", plan.camera_at(3_000.0).zoom(FRAME));
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn never_moves_the_camera_at_a_zoom_level_of_one() {
-        let style = Style { zoom: Zoom { level: 1.0 } };
+        let style = Style { zoom: Zoom { level: 1.0 }, ..Style::default() };
         let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &style);
 
         for t in [0.0, 2_500.0, 3_000.0, 5_000.0] {

@@ -12,28 +12,45 @@ use tiny_skia::{
 
 use crate::capture::Recording;
 use crate::plan::{Cursor, Plan, Ripple, Size, View};
+use crate::style::{Aspect, Background, Fill, Rgb, Style};
 
-pub type Rgb = [u8; 3];
-
-#[derive(Clone, Debug)]
-pub struct Look {
-    /// Diagonal gradient behind the video, top left to bottom right.
-    pub background: [Rgb; 2],
-    /// Share of each side left for the background.
-    pub padding: f32,
-    pub radius: f32,
-    pub accent: Rgb,
-    pub cursor_size: f32,
+/// The output frame and where the video sits in it, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub width: u32,
+    pub height: u32,
+    pub inner: Rect,
+    /// Device pixels per CSS pixel.
+    pub density: u32,
 }
 
-impl Default for Look {
-    fn default() -> Look {
-        Look { background: [[45, 27, 105], [226, 88, 31]], padding: 0.05, radius: 18.0, accent: [255, 106, 61], cursor_size: 26.0 }
+impl Layout {
+    pub fn new(css_size: [u32; 2], density: u32, background: &Background) -> Layout {
+        let [css_width, css_height] = css_size;
+        let (css_w, css_h) = match background.aspect {
+            Aspect::Auto => (css_width, css_height),
+            Aspect::Ratio(w, h) if (w as u64 * css_height as u64) >= (h as u64 * css_width as u64) => {
+                (even(css_height as f64 * w as f64 / h as f64), css_height)
+            }
+            Aspect::Ratio(w, h) => (css_width, even(css_width as f64 * h as f64 / w as f64)),
+        };
+        let (width, height) = (css_w * density, css_h * density);
+        let (w, h) = (width as f32, height as f32);
+        let padding = if background.fill == Fill::None { 0.0 } else { background.padding as f32 / 100.0 };
+        let (room_w, room_h) = (w * (1.0 - 2.0 * padding), h * (1.0 - 2.0 * padding));
+        let fit = (room_w / css_width as f32).min(room_h / css_height as f32);
+        let (inner_w, inner_h) = (css_width as f32 * fit, css_height as f32 * fit);
+        let inner = Rect::from_xywh((w - inner_w) / 2.0, (h - inner_h) / 2.0, inner_w, inner_h).expect("padding leaves room for the video");
+        Layout { width, height, inner, density }
     }
 }
 
+fn even(value: f64) -> u32 {
+    (value / 2.0).round() as u32 * 2
+}
+
 pub struct Compositor {
-    style: Look,
+    style: Style,
     /// Frame pixels per CSS pixel: the plan and the style are in CSS pixels.
     density: f32,
     inner: Rect,
@@ -43,40 +60,31 @@ pub struct Compositor {
 }
 
 impl Compositor {
-    pub fn new(width: u32, height: u32, density: u32, style: &Look) -> Compositor {
-        let density = density as f32;
-        let (w, h) = (width as f32, height as f32);
-        let inner = Rect::from_xywh(w * style.padding, h * style.padding, w * (1.0 - 2.0 * style.padding), h * (1.0 - 2.0 * style.padding))
-            .expect("padding leaves room for the video");
-        let window = rounded_rect(inner, style.radius * density);
+    pub fn new(layout: Layout, style: &Style) -> Result<Compositor> {
+        let Layout { width, height, inner, .. } = layout;
+        let density = layout.density as f32;
+        let backdrop = &style.background;
+        let radius = if backdrop.fill == Fill::None { 0.0 } else { backdrop.corners as f32 / 100.0 * inner.width().min(inner.height()) };
+        let window = rounded_rect(inner, radius);
 
-        let mut background = Pixmap::new(width, height).expect("frame size");
-        let [from, to] = style.background;
-        let gradient = LinearGradient::new(
-            Point::from_xy(0.0, 0.0),
-            Point::from_xy(w, h),
-            vec![GradientStop::new(0.0, color(from, 255)), GradientStop::new(1.0, color(to, 255))],
-            SpreadMode::Pad,
-            Transform::identity(),
-        );
-        let paint = Paint { shader: gradient.unwrap_or(tiny_skia::Shader::SolidColor(color(from, 255))), ..Paint::default() };
-        background.fill_rect(Rect::from_xywh(0.0, 0.0, w, h).unwrap(), &paint, Transform::identity(), None);
-        if style.padding > 0.0 {
+        let mut background = fill_pixmap(&backdrop.fill, width, height)?;
+        if backdrop.fill != Fill::None && backdrop.shadow > 0.0 && inner.width() < width as f32 {
+            let alpha = (backdrop.shadow * 9.0 / 50.0).round() as u8;
             // A soft shadow from stacked translucent outlines: tiny-skia has no blur.
             for spread in (1..=14).rev() {
                 let s = spread as f32 * 1.6 * density;
                 let grown = Rect::from_xywh(inner.x() - s, inner.y() - s + 6.0 * density, inner.width() + 2.0 * s, inner.height() + 2.0 * s).unwrap();
                 let mut shade = Paint::default();
-                shade.set_color(Color::from_rgba8(0, 0, 0, 9));
+                shade.set_color(Color::from_rgba8(0, 0, 0, alpha));
                 shade.anti_alias = true;
-                background.fill_path(&rounded_rect(grown, style.radius * density + s), &shade, FillRule::Winding, Transform::identity(), None);
+                background.fill_path(&rounded_rect(grown, radius + s), &shade, FillRule::Winding, Transform::identity(), None);
             }
         }
 
         let mut video_mask = Mask::new(width, height).expect("frame size");
         video_mask.fill_path(&window, FillRule::Winding, true, Transform::identity());
 
-        Compositor { style: style.clone(), density, inner, background, video_mask, arrow: arrow() }
+        Ok(Compositor { style: style.clone(), density, inner, background, video_mask, arrow: arrow() })
     }
 
     pub fn compose(&self, source: &Pixmap, view: View, cursor: Option<Cursor>, ripples: &[Ripple]) -> Pixmap {
@@ -98,14 +106,14 @@ impl Compositor {
             let radius = (12.0 + 30.0 * progress) * self.density * magnification.sqrt();
             if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
                 let mut fill = Paint { anti_alias: true, ..Paint::default() };
-                fill.set_color(color(self.style.accent, ((1.0 - progress) * 115.0) as u8));
+                fill.set_color(color(ACCENT, ((1.0 - progress) * 115.0) as u8));
                 out.fill_path(&circle, &fill, FillRule::Winding, Transform::identity(), Some(&self.video_mask));
             }
         }
 
         if let Some(cursor) = cursor {
             let (x, y) = place(cursor.x, cursor.y);
-            let size = self.style.cursor_size / 20.0 * self.density * magnification.powf(0.6) * (1.0 - 0.18 * cursor.pressed as f32);
+            let size = CURSOR_SIZE / 20.0 * self.density * magnification.powf(0.6) * (1.0 - 0.18 * cursor.pressed as f32);
             let at = Transform::from_translate(x, y).pre_scale(size, size);
             let mut shadow = Paint { anti_alias: true, ..Paint::default() };
             shadow.set_color(Color::from_rgba8(0, 0, 0, 70));
@@ -121,7 +129,53 @@ impl Compositor {
     }
 }
 
-fn color([r, g, b]: Rgb, alpha: u8) -> Color {
+const ACCENT: Rgb = Rgb([255, 106, 61]);
+const CURSOR_SIZE: f32 = 26.0;
+
+fn fill_pixmap(fill: &Fill, width: u32, height: u32) -> Result<Pixmap> {
+    let mut pixmap = Pixmap::new(width, height).expect("frame size");
+    let (w, h) = (width as f32, height as f32);
+    match fill {
+        Fill::None => pixmap.fill(Color::BLACK),
+        Fill::Color(rgb) => pixmap.fill(color(*rgb, 255)),
+        Fill::Gradient(from, to) => {
+            let gradient = LinearGradient::new(
+                Point::from_xy(0.0, 0.0),
+                Point::from_xy(w, h),
+                vec![GradientStop::new(0.0, color(*from, 255)), GradientStop::new(1.0, color(*to, 255))],
+                SpreadMode::Pad,
+                Transform::identity(),
+            );
+            let paint = Paint { shader: gradient.unwrap_or(tiny_skia::Shader::SolidColor(color(*from, 255))), ..Paint::default() };
+            pixmap.fill_rect(Rect::from_xywh(0.0, 0.0, w, h).unwrap(), &paint, Transform::identity(), None);
+        }
+        Fill::Image(path) => {
+            let rgb = read_image(path, width, height)?;
+            for (pixel, source) in pixmap.data_mut().chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+                pixel[..3].copy_from_slice(source);
+                pixel[3] = 255;
+            }
+        }
+    }
+    Ok(pixmap)
+}
+
+/// Decodes an image of any format ffmpeg reads, scaled to cover the frame and cropped to it.
+fn read_image(path: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
+    let cover = format!("scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height}");
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-vf", &cover, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .context("starting ffmpeg")?;
+    if !output.status.success() || output.stdout.len() != (width * height * 3) as usize {
+        bail!("could not read the background image {}: {}", path.display(), String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(output.stdout)
+}
+
+fn color(Rgb([r, g, b]): Rgb, alpha: u8) -> Color {
     Color::from_rgba8(r, g, b, alpha)
 }
 
@@ -168,18 +222,20 @@ pub fn video_duration_ms(video: &Path) -> Result<f64> {
 /// streams it to an H.264 encoder, which downsamples to the demo's size.
 pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     let [css_width, css_height] = recording.size;
-    let (width, height) = (css_width * recording.scale, css_height * recording.scale);
+    let (source_width, source_height) = (css_width * recording.scale, css_height * recording.scale);
+    let layout = Layout::new(recording.size, recording.scale, &recording.style.background);
+    let (width, height) = (layout.width, layout.height);
     let fps = recording.fps as f64;
     let mut decoder = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(&recording.video)
-        .args(["-vf", &format!("fps={fps},scale={width}:{height}:flags=lanczos"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .args(["-vf", &format!("fps={fps},scale={source_width}:{source_height}:flags=lanczos"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
         .stdout(Stdio::piped())
         .spawn()
         .context("starting the ffmpeg decoder")?;
     let mut encoder = Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{width}x{height}"), "-r", &recording.fps.to_string(), "-i", "-"])
-        .args(["-vf", &format!("scale={css_width}:{css_height}:flags=lanczos")])
+        .args(["-vf", &format!("scale={}:{}:flags=lanczos", width / recording.scale, height / recording.scale)])
         .args(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
         .arg(output)
         .stdin(Stdio::piped())
@@ -188,9 +244,9 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     let mut frames = decoder.stdout.take().expect("piped stdout");
     let mut sink = encoder.stdin.take().expect("piped stdin");
 
-    let compositor = Compositor::new(width, height, recording.scale, &Look::default());
+    let compositor = Compositor::new(layout, &recording.style)?;
     let workers = thread::available_parallelism().map_or(1, |n| n.get());
-    let mut buffer = vec![0u8; (width * height * 4) as usize];
+    let mut buffer = vec![0u8; (source_width * source_height * 4) as usize];
     let mut current: Option<Arc<Pixmap>> = None;
     let mut decoded: i64 = -1;
     let total = (plan.time.output_duration_ms() / 1_000.0 * fps).ceil() as i64;
@@ -201,7 +257,7 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
         while decoded < wanted {
             match frames.read_exact(&mut buffer) {
                 Ok(()) => {
-                    current = Pixmap::from_vec(buffer.clone(), tiny_skia::IntSize::from_wh(width, height).unwrap()).map(Arc::new);
+                    current = Pixmap::from_vec(buffer.clone(), tiny_skia::IntSize::from_wh(source_width, source_height).unwrap()).map(Arc::new);
                     decoded += 1;
                 }
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
@@ -246,40 +302,46 @@ pub fn plan_for(recording: &Recording) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::Style;
     use tiny_skia::Color;
 
-    const RED: Rgb = [220, 30, 30];
-    const BLUE: Rgb = [30, 30, 220];
+    const RED: Rgb = Rgb([220, 30, 30]);
+    const BLUE: Rgb = Rgb([30, 30, 220]);
+    const BLACK: Rgb = Rgb([0, 0, 0]);
+    const GREEN: Rgb = Rgb([0, 200, 0]);
+    const WHITE: Rgb = Rgb([255, 255, 255]);
 
-    fn flat(background: Rgb) -> Look {
-        Look { background: [background, background], padding: 0.0, radius: 0.0, accent: [255, 106, 61], cursor_size: 26.0 }
+    fn flat(background: Rgb) -> Style {
+        Style { background: Background { fill: Fill::Color(background), padding: 0.0, corners: 0.0, ..Background::default() }, ..Style::default() }
+    }
+
+    fn compositor(size: [u32; 2], density: u32, style: &Style) -> Compositor {
+        Compositor::new(Layout::new(size, density, &style.background), style).unwrap()
     }
 
     fn halves() -> Pixmap {
         let mut source = Pixmap::new(200, 100).unwrap();
-        source.fill(Color::from_rgba8(RED[0], RED[1], RED[2], 255));
+        source.fill(color(RED, 255));
         let blue = tiny_skia::Rect::from_xywh(100.0, 0.0, 100.0, 100.0).unwrap();
         let mut paint = tiny_skia::Paint::default();
-        paint.set_color_rgba8(BLUE[0], BLUE[1], BLUE[2], 255);
+        paint.set_color(color(BLUE, 255));
         source.fill_rect(blue, &paint, tiny_skia::Transform::identity(), None);
         source
     }
 
     fn rgb(pixmap: &Pixmap, x: u32, y: u32) -> Rgb {
         let p = pixmap.pixel(x, y).unwrap();
-        [p.red(), p.green(), p.blue()]
+        Rgb([p.red(), p.green(), p.blue()])
     }
 
     fn near(a: Rgb, b: Rgb) -> bool {
-        a.iter().zip(b).all(|(x, y)| (*x as i32 - y as i32).abs() < 12)
+        a.0.iter().zip(b.0).all(|(x, y)| (*x as i32 - y as i32).abs() < 12)
     }
 
     const FULL: View = View { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
 
     #[test]
     fn shows_the_whole_source_when_the_camera_is_out() {
-        let out = Compositor::new(200, 100, 1, &flat([0, 0, 0])).compose(&halves(), FULL, None, &[]);
+        let out = compositor([200, 100], 1, &flat(BLACK)).compose(&halves(), FULL, None, &[]);
 
         assert!(near(rgb(&out, 20, 50), RED));
         assert!(near(rgb(&out, 180, 50), BLUE));
@@ -289,7 +351,7 @@ mod tests {
     fn fills_the_frame_with_the_part_the_camera_zooms_onto() {
         let right_half = View { x: 100.0, y: 25.0, w: 100.0, h: 50.0 };
 
-        let out = Compositor::new(200, 100, 1, &flat([0, 0, 0])).compose(&halves(), right_half, None, &[]);
+        let out = compositor([200, 100], 1, &flat(BLACK)).compose(&halves(), right_half, None, &[]);
 
         assert!(near(rgb(&out, 20, 50), BLUE), "left edge is {:?}", rgb(&out, 20, 50));
         assert!(near(rgb(&out, 180, 50), BLUE));
@@ -297,11 +359,12 @@ mod tests {
 
     #[test]
     fn frames_the_video_on_the_background() {
-        let style = Look { padding: 0.1, ..flat([0, 200, 0]) };
+        let mut style = flat(GREEN);
+        style.background.padding = 10.0;
 
-        let out = Compositor::new(400, 200, 1, &style).compose(&halves(), FULL, None, &[]);
+        let out = compositor([400, 200], 1, &style).compose(&halves(), FULL, None, &[]);
 
-        assert!(near(rgb(&out, 2, 2), [0, 200, 0]), "corner is {:?}", rgb(&out, 2, 2));
+        assert!(near(rgb(&out, 2, 2), GREEN), "corner is {:?}", rgb(&out, 2, 2));
         assert!(near(rgb(&out, 100, 100), RED));
     }
 
@@ -315,7 +378,7 @@ mod tests {
     fn keeps_a_2x_capture_in_place_when_the_plan_is_in_css_pixels() {
         let right_half = View { x: 100.0, y: 25.0, w: 100.0, h: 50.0 };
 
-        let out = Compositor::new(400, 200, 2, &flat([0, 0, 0])).compose(&doubled(&halves()), right_half, None, &[]);
+        let out = compositor([200, 100], 2, &flat(BLACK)).compose(&doubled(&halves()), right_half, None, &[]);
 
         assert_eq!((out.width(), out.height()), (400, 200));
         assert!(near(rgb(&out, 40, 100), BLUE), "left edge is {:?}", rgb(&out, 40, 100));
@@ -328,11 +391,11 @@ mod tests {
         white.fill(Color::WHITE);
         let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0 };
 
-        let out = Compositor::new(400, 200, 2, &flat([0, 0, 0])).compose(&white, View { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, Some(cursor), &[]);
+        let out = compositor([200, 100], 2, &flat(BLACK)).compose(&white, View { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, Some(cursor), &[]);
 
         let dark = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
             let out = &out;
-            xs.flat_map(move |x| ys.clone().map(move |y| (x, y))).filter(|&(x, y)| rgb(out, x, y)[0] < 128).count()
+            xs.flat_map(move |x| ys.clone().map(move |y| (x, y))).filter(|&(x, y)| rgb(out, x, y).0[0] < 128).count()
         };
         assert!(dark(120..150, 60..110) > 20, "no cursor at (120, 60)");
         assert_eq!(dark(0..112, 0..200), 0, "cursor drawn left of its position");
@@ -362,17 +425,136 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "320,180");
     }
 
+    fn backdrop(fill: Fill, padding: f64, shadow: f64, corners: f64) -> Style {
+        Style { background: Background { fill, padding, shadow, corners, ..Background::default() }, ..Style::default() }
+    }
+
+    #[test]
+    fn keeps_todays_layout_by_default() {
+        let layout = Layout::new([1920, 1080], 2, &Background::default());
+
+        assert_eq!((layout.width, layout.height), (3840, 2160));
+        assert_eq!((layout.inner.x(), layout.inner.y()), (192.0, 108.0));
+        assert_eq!((layout.inner.width(), layout.inner.height()), (3456.0, 1944.0));
+    }
+
+    #[test]
+    fn widens_the_frame_for_a_wider_aspect_and_centers_the_video() {
+        let background = Background { aspect: Aspect::Ratio(2, 1), padding: 0.0, ..Background::default() };
+
+        let layout = Layout::new([100, 100], 1, &background);
+
+        assert_eq!((layout.width, layout.height), (200, 100));
+        assert_eq!((layout.inner.x(), layout.inner.width()), (50.0, 100.0));
+    }
+
+    #[test]
+    fn heightens_the_frame_for_a_taller_aspect_with_even_sides() {
+        let background = Background { aspect: Aspect::Ratio(9, 16), padding: 0.0, ..Background::default() };
+
+        let layout = Layout::new([1000, 1000], 1, &background);
+
+        assert_eq!((layout.width, layout.height), (1000, 1778));
+        assert_eq!(layout.inner.width(), 1000.0);
+        assert_eq!(layout.inner.y(), 389.0);
+    }
+
+    #[test]
+    fn leaves_no_room_around_the_video_without_a_background() {
+        let background = Background { fill: Fill::None, padding: 12.0, ..Background::default() };
+
+        let layout = Layout::new([200, 100], 1, &background);
+
+        assert_eq!((layout.inner.x(), layout.inner.width()), (0.0, 200.0));
+    }
+
+    #[test]
+    fn draws_neither_corners_nor_a_shadow_without_a_background() {
+        let style = backdrop(Fill::None, 12.0, 100.0, 40.0);
+
+        let out = compositor([200, 100], 1, &style).compose(&halves(), FULL, None, &[]);
+
+        assert!(near(rgb(&out, 0, 0), RED), "corner is {:?}", rgb(&out, 0, 0));
+    }
+
+    #[test]
+    fn rounds_the_corners_by_a_percent_of_the_short_side() {
+        let style = backdrop(Fill::Color(GREEN), 0.0, 0.0, 30.0);
+
+        let out = compositor([200, 100], 1, &style).compose(&halves(), FULL, None, &[]);
+
+        assert!(near(rgb(&out, 1, 1), GREEN), "corner is {:?}", rgb(&out, 1, 1));
+        assert!(near(rgb(&out, 40, 1), RED), "top edge is {:?}", rgb(&out, 40, 1));
+    }
+
+    #[test]
+    fn darkens_the_backdrop_more_with_a_stronger_shadow() {
+        let shadow_at = |strength| {
+            let style = backdrop(Fill::Color(WHITE), 20.0, strength, 0.0);
+            rgb(&compositor([400, 200], 1, &style).compose(&halves(), FULL, None, &[]), 200, 165).0[0]
+        };
+
+        assert_eq!(shadow_at(0.0), 255);
+        assert!(shadow_at(50.0) < 200, "{}", shadow_at(50.0));
+        assert!(shadow_at(100.0) < shadow_at(50.0));
+    }
+
+    #[test]
+    fn fills_the_backdrop_with_an_image() {
+        let dir = std::env::temp_dir().join(format!("reel-wallpaper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("wall.png");
+        let made = Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=#00c800:s=64x64", "-frames:v", "1"]).arg(&image).status().unwrap();
+        assert!(made.success());
+        let style = backdrop(Fill::Image(image), 10.0, 0.0, 0.0);
+
+        let out = compositor([200, 100], 1, &style).compose(&halves(), FULL, None, &[]);
+
+        assert!(near(rgb(&out, 2, 2), GREEN), "corner is {:?}", rgb(&out, 2, 2));
+        assert!(near(rgb(&out, 50, 50), RED));
+    }
+
+    #[test]
+    fn says_which_background_image_it_could_not_read() {
+        let style = backdrop(Fill::Image("/nonexistent/wall.png".into()), 10.0, 0.0, 0.0);
+
+        let Err(error) = Compositor::new(Layout::new([200, 100], 1, &style.background), &style) else { panic!("read a missing image") };
+
+        assert!(error.to_string().contains("/nonexistent/wall.png"), "{error}");
+    }
+
+    #[test]
+    fn renders_a_frame_of_the_asked_aspect() {
+        let dir = std::env::temp_dir().join(format!("reel-render-aspect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("raw.mp4");
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=white:s=640x360:r=10:d=1", "-pix_fmt", "yuv420p"])
+            .arg(&video)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let style = Style { background: Background { aspect: Aspect::Ratio(1, 1), ..Background::default() }, ..Style::default() };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style };
+        let output = dir.join("out.mp4");
+
+        render(&recording, &plan_for(&recording), &output).unwrap();
+
+        let probe = Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0"]).arg(&output).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "320,320");
+    }
+
     #[test]
     fn draws_the_cursor_where_the_plan_puts_it() {
         let mut white = Pixmap::new(200, 100).unwrap();
         white.fill(Color::WHITE);
         let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0 };
 
-        let out = Compositor::new(200, 100, 1, &flat([0, 0, 0])).compose(&white, FULL, Some(cursor), &[]);
+        let out = compositor([200, 100], 1, &flat(BLACK)).compose(&white, FULL, Some(cursor), &[]);
 
-        let dark = (60..76).flat_map(|x| (30..56).map(move |y| (x, y))).filter(|&(x, y)| rgb(&out, x, y)[0] < 128).count();
+        let dark = (60..76).flat_map(|x| (30..56).map(move |y| (x, y))).filter(|&(x, y)| rgb(&out, x, y).0[0] < 128).count();
         assert!(dark > 10, "only {dark} dark pixels near the cursor");
-        assert_eq!(rgb(&out, 150, 80), [255, 255, 255]);
+        assert_eq!(rgb(&out, 150, 80), WHITE);
     }
 
     #[test]
@@ -381,9 +563,9 @@ mod tests {
         white.fill(Color::WHITE);
         let ripple = Ripple { x: 100.0, y: 50.0, progress: 0.3 };
 
-        let out = Compositor::new(200, 100, 1, &flat([0, 0, 0])).compose(&white, FULL, None, &[ripple]);
+        let out = compositor([200, 100], 1, &flat(BLACK)).compose(&white, FULL, None, &[ripple]);
 
-        assert_ne!(rgb(&out, 100, 50), [255, 255, 255]);
-        assert_eq!(rgb(&out, 10, 10), [255, 255, 255]);
+        assert_ne!(rgb(&out, 100, 50), WHITE);
+        assert_eq!(rgb(&out, 10, 10), WHITE);
     }
 }
