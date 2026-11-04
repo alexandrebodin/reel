@@ -12,7 +12,7 @@ use tiny_skia::Pixmap;
 use crate::capture::Recording;
 use crate::events::Pointer;
 use crate::plan::Plan;
-use crate::render::{exact_frame, read_source_frame, render_with_progress, Compositor, Layout, SPRITE_SCALE, SPRITE_SIZE, SPRITE_TIP};
+use crate::render::{exact_frame, read_source_frame, render_with_progress, snapped_to_frame, Compositor, Layout, SPRITE_SCALE, SPRITE_SIZE, SPRITE_TIP};
 use crate::server::{Request, Response};
 use crate::style::Style;
 use crate::timeline::Timeline;
@@ -82,6 +82,7 @@ impl Working {
         }
         json!({
             "generation": self.generation,
+            "name": take_name(&recording.video),
             "size": recording.size,
             "scale": recording.scale,
             "fps": recording.fps,
@@ -197,6 +198,7 @@ impl Editor {
             let compositor = working.full()?;
             (working.recording.clone(), working.plan.clone(), compositor)
         };
+        let (output_ms, source_ms) = snapped_to_frame(&recording, &plan, source_ms);
         let index = (source_ms * recording.fps as f64 / 1_000.0).floor() as i64;
         let cached = self.source_frame.lock().expect("source frame").clone();
         let source = match cached {
@@ -207,7 +209,7 @@ impl Editor {
                 frame
             }
         };
-        exact_frame(&recording, &plan, &compositor, &source, source_ms).encode_png().context("encoding the frame")
+        exact_frame(&recording, &plan, &compositor, &source, output_ms).encode_png().context("encoding the frame")
     }
 
     fn start_render(&self) -> Result<Response> {
@@ -236,6 +238,15 @@ impl Editor {
         });
         Ok(json_response(json!({ "running": true })))
     }
+}
+
+/// A take is `<name>/raw.mp4`, so the folder names it better than the file.
+fn take_name(video: &Path) -> String {
+    let stem = video.file_stem().and_then(|s| s.to_str()).unwrap_or("take");
+    if stem != "raw" {
+        return stem.to_string();
+    }
+    video.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or(stem).to_string()
 }
 
 fn json_response(value: Value) -> Response {
@@ -342,6 +353,12 @@ mod tests {
         assert_eq!(project["edited"], false);
         assert_eq!(project["timeline"]["clicks"].as_array().unwrap().len(), 1);
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn names_a_take_by_its_folder_and_any_other_video_by_its_file() {
+        assert_eq!(take_name(Path::new("/out/domains/raw.mp4")), "domains");
+        assert_eq!(take_name(Path::new("/Movies/launch.mov")), "launch");
     }
 
     #[test]

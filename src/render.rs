@@ -472,9 +472,16 @@ fn compose_shots(compositor: &Compositor, plan: &Plan, source: &Pixmap, times: &
     compositor.compose_blurred(source, &shots, &plan.ripples_at(times[0]))
 }
 
-/// The frame a render shows at a source time, drawn on its own.
-pub fn exact_frame(recording: &Recording, plan: &Plan, compositor: &Compositor, source: &Pixmap, source_ms: f64) -> Pixmap {
-    compose_shots(compositor, plan, source, &shutter_times(recording, plan, plan.time.output_ms(source_ms)))
+/// Which output frame of a render shows a source time: its time in the output and in the take.
+pub fn snapped_to_frame(recording: &Recording, plan: &Plan, source_ms: f64) -> (f64, f64) {
+    let frame_ms = 1_000.0 / recording.fps as f64;
+    let output_ms = (plan.time.output_ms(source_ms) / frame_ms + 1e-6).floor() * frame_ms;
+    (output_ms, plan.time.source_ms(output_ms))
+}
+
+/// One output frame, drawn just as a render draws it.
+pub fn exact_frame(recording: &Recording, plan: &Plan, compositor: &Compositor, source: &Pixmap, output_ms: f64) -> Pixmap {
+    compose_shots(compositor, plan, source, &shutter_times(recording, plan, output_ms))
 }
 
 /// Decodes one frame of the take at the size a render composites it.
@@ -685,8 +692,23 @@ mod tests {
         assert!(near(rgb(&early, 30, 18), Rgb([254, 0, 0])), "{:?}", rgb(&early, 30, 18));
         assert!(near(rgb(&late, 30, 18), Rgb([0, 0, 254])), "{:?}", rgb(&late, 30, 18));
         let c = compositor([64, 36], 1, &recording.style);
-        let frame = exact_frame(&recording, &plan_for(&recording), &c, &late, 1_700.0);
+        let plan = plan_for(&recording);
+        let (output_ms, _) = snapped_to_frame(&recording, &plan, 1_700.0);
+        let frame = exact_frame(&recording, &plan, &c, &late, output_ms);
         assert!(near(rgb(&frame, 5, 5), Rgb([0, 0, 254])), "{:?}", rgb(&frame, 5, 5));
+    }
+
+    #[test]
+    fn snaps_a_source_time_to_the_output_frame_that_shows_it() {
+        let speeds = vec![crate::timeline::SpeedSpan { start_ms: 1_000.0, end_ms: 3_000.0, speed: Some(2.0) }];
+        let timeline = crate::timeline::Timeline { speeds, ..Default::default() };
+        let recording = Recording { video: "raw.mp4".into(), size: [64, 36], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![], style: Style::default(), timeline: Some(timeline), imported: false };
+        let plan = plan_for(&recording);
+
+        assert_eq!(snapped_to_frame(&recording, &plan, 550.0), (500.0, 500.0));
+        let (output_ms, source_ms) = snapped_to_frame(&recording, &plan, 2_050.0);
+        assert!((output_ms - 1_500.0).abs() < 1e-6, "{output_ms}");
+        assert!((source_ms - 2_000.0).abs() < 1e-6, "{source_ms}");
     }
 
     fn backdrop(fill: Fill, padding: f64, shadow: f64, corners: f64) -> Style {

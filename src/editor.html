@@ -1,1 +1,904 @@
-<!doctype html><title>reel</title><canvas></canvas>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reel</title>
+<style>
+:root {
+  --bench: #1b2b2e; --panel: #233639; --well: #15211f; --rule: #3b5356;
+  --paper: #efe9da; --muted: #9db0ac; --pencil: #f6c944; --wax: #ff7f5c; --film: #0d1413;
+  --label: "DIN Alternate", "Avenir Next Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "Avenir Next", system-ui, sans-serif;
+  --time: ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bench); color: var(--paper); font: 14px/1.35 var(--body); display: grid; grid-template: auto minmax(0, 1fr) auto / minmax(0, 1fr) 300px; height: 100vh; }
+button, select, input { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--paper); }
+button:disabled { opacity: .4; cursor: default; }
+:focus-visible { outline: 2px solid var(--pencil); outline-offset: 1px; }
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--rule); min-width: 0; }
+header h1 { font: 700 19px var(--label); letter-spacing: .02em; margin: 0 10px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#status { color: var(--muted); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#status.bad { color: var(--wax); white-space: normal; }
+#render { background: var(--paper); color: var(--bench); border-color: var(--paper); font-weight: 600; }
+#result { color: var(--pencil); }
+main { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+#stage { position: relative; min-height: 0; background: var(--well); display: flex; align-items: center; justify-content: center; padding: 14px; overflow: hidden; }
+#picture { position: relative; display: block; max-width: 100%; max-height: 100%; }
+#picture canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+#picture img { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#transport { display: flex; align-items: center; gap: 10px; padding: 7px 14px; border-top: 1px solid var(--rule); flex-wrap: wrap; }
+#play { min-width: 64px; }
+#clock { font: 13px var(--time); }
+#clock small { color: var(--muted); font-size: 12px; margin-left: 8px; }
+#adds { margin-left: auto; display: flex; gap: 6px; }
+kbd { font: 11px var(--time); color: var(--muted); margin-left: 4px; }
+aside { border-left: 1px solid var(--rule); overflow-y: auto; min-height: 0; padding-bottom: 20px; }
+aside section { padding: 10px 14px 12px; border-bottom: 1px solid var(--rule); }
+aside h2 { font: 700 13px var(--label); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+#selection h2 { color: var(--pencil); }
+#selection.speed h2 { color: var(--wax); }
+#selection.click h2 { color: var(--paper); }
+#selection p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+.field { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; margin-bottom: 7px; font-size: 13px; }
+.field > label, .field > span.name { color: var(--paper); }
+.field output { font: 11px var(--time); color: var(--muted); }
+.range { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; align-items: center; }
+input[type=range] { width: 100%; accent-color: var(--pencil); margin: 0; }
+input[type=checkbox] { accent-color: var(--pencil); width: 16px; height: 16px; margin: 0; justify-self: start; }
+input[type=color] { width: 38px; height: 24px; padding: 0; background: none; border: 1px solid var(--rule); border-radius: 3px; }
+input[type=text], input[type=number], select { background: var(--well); border: 1px solid var(--rule); border-radius: 3px; padding: 3px 6px; width: 100%; min-width: 0; }
+.seg { display: flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+.seg button { flex: 1; border: 0; border-radius: 0; padding: 3px 4px; background: none; font-size: 12px; min-width: 0; }
+.seg button[aria-pressed=true] { background: var(--paper); color: var(--bench); }
+.hint { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+.colors { display: flex; gap: 6px; }
+footer { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 0 14px 10px; user-select: none; }
+#tracks { position: relative; touch-action: none; }
+#ruler { position: relative; height: 22px; font: 10px var(--time); color: var(--muted); cursor: ew-resize; overflow: hidden; }
+#ruler span { position: absolute; top: 5px; padding-left: 4px; border-left: 1px solid var(--rule); height: 17px; }
+#film { position: relative; height: 62px; background: var(--film) url(/strip.jpg) 0 4px / 100% 54px no-repeat; cursor: ew-resize; border-radius: 2px; }
+#film::before, #film::after { content: ""; position: absolute; left: 0; right: 0; height: 4px; background: repeating-linear-gradient(90deg, var(--film) 0 5px, #51605d 5px 9px, var(--film) 9px 14px); }
+#film::before { top: 0; } #film::after { bottom: 0; }
+.lane { position: relative; height: 28px; margin-top: 4px; background: var(--well); border-radius: 2px; }
+.lane::before { content: attr(data-name); position: absolute; left: 6px; top: 6px; font: 700 11px var(--label); letter-spacing: .08em; text-transform: uppercase; color: var(--rule); pointer-events: none; }
+.mark { position: absolute; top: 2px; bottom: 2px; min-width: 6px; padding: 0 9px; border: 2px solid; border-radius: 3px; background: none; font: 700 12px var(--label); overflow: hidden; white-space: nowrap; cursor: grab; text-align: left; }
+.mark.zoom { border-color: var(--pencil); color: var(--pencil); background: #f6c94422; }
+.mark.speed { border-color: var(--wax); color: var(--wax); background: #ff7f5c22; }
+.mark.cut { background: repeating-linear-gradient(135deg, #ff7f5c44 0 5px, transparent 5px 10px); }
+.mark[aria-pressed=true] { box-shadow: 0 0 0 2px var(--paper); }
+.mark::before, .mark::after { content: ""; position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
+.mark::before { left: 0; } .mark::after { right: 0; }
+.dot { position: absolute; top: 6px; width: 16px; height: 16px; margin-left: -8px; padding: 0; border-radius: 50%; border: 2px solid var(--paper); background: #efe9da55; cursor: grab; }
+.dot[aria-pressed=true] { background: var(--paper); box-shadow: 0 0 0 2px var(--pencil); }
+#head { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--paper); pointer-events: none; }
+#head::before { content: ""; position: absolute; left: -5px; top: 12px; border: 5px solid transparent; border-top-color: var(--paper); }
+@media (max-width: 800px) {
+  body { display: block; height: auto; }
+  main { min-height: 56vh; }
+  aside { border-left: 0; }
+  header { flex-wrap: wrap; }
+  #status { flex-basis: 100%; order: 5; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="name">reel</h1>
+  <span id="status" role="status">Loading…</span>
+  <button id="undo" title="⌘Z">Undo</button>
+  <button id="redo" title="⇧⌘Z">Redo</button>
+  <button id="reset">Reset to automatic</button>
+  <a id="result" target="_blank" hidden>Open render</a>
+  <button id="render">Render</button>
+</header>
+<main>
+  <div id="stage"><div id="picture"><canvas id="canvas" aria-label="Preview of the video"></canvas><img id="exact" alt="" hidden></div></div>
+  <div id="transport">
+    <button id="play">Play</button>
+    <span id="clock"></span>
+    <div id="adds">
+      <button id="add-zoom">Add zoom<kbd>Z</kbd></button>
+      <button id="add-speed">Add speed<kbd>S</kbd></button>
+      <button id="add-click">Add click<kbd>C</kbd></button>
+    </div>
+  </div>
+</main>
+<aside>
+  <section id="selection"></section>
+  <div id="form"></div>
+</aside>
+<footer>
+  <div id="tracks">
+    <div id="ruler"></div>
+    <div id="film"></div>
+    <div class="lane" id="lane-zoom" data-name="Zoom"></div>
+    <div class="lane" id="lane-speed" data-name="Speed"></div>
+    <div class="lane" id="lane-click" data-name="Clicks"></div>
+    <div id="head"></div>
+  </div>
+</footer>
+<video id="video" src="/video" muted playsinline preload="auto" hidden></video>
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $("canvas"), ctx = canvas.getContext("2d"), video = $("video"), exact = $("exact");
+const ROW = 9, ARRIVES_EARLY_MS = 120, TRAVEL_MS = 650, MIN_MARK_MS = 200, RIPPLE_MS = 500;
+const images = { background: new Image(), arrow: new Image(), hand: new Image(), text: new Image() };
+const POINTERS = ["arrow", "hand", "text"];
+
+let project = null, style = null, timeline = null, edited = false;
+let selected = null, t = 0, undoStack = [], redoStack = [], gesture = false, drag = null;
+let imagesFor = null, sending = false, pending = false;
+
+const snapshot = () => JSON.stringify({ style, timeline, edited });
+function remember() { undoStack.push(snapshot()); redoStack = []; updateButtons(); }
+function restore(text) { ({ style, timeline, edited } = JSON.parse(text)); selected = null; renderAll(); send(); }
+
+async function api(path, body) {
+  const reply = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await reply.json();
+  if (!reply.ok) throw new Error(data.error);
+  return data;
+}
+
+async function send() {
+  if (sending) { pending = true; return; }
+  sending = true;
+  updateButtons();
+  setStatus("Saving…");
+  try {
+    adopt(await api("/api/edit", { style, timeline: edited ? timeline : null }));
+    setStatus(savedText());
+  } catch (error) {
+    setStatus(error.message, true);
+    ({ style, timeline, edited } = JSON.parse(JSON.stringify(lastGood)));
+    gesture = false;
+    renderAll();
+  }
+  sending = false;
+  if (pending) { pending = false; send(); }
+}
+
+let lastGood = null;
+function adopt(next) {
+  project = next;
+  const busy = pending || gesture || drag;
+  if (!busy) {
+    style = next.style; timeline = next.timeline; edited = next.edited;
+    lastGood = JSON.parse(snapshot());
+  }
+  refreshImages();
+  sizePicture();
+  if (busy) { renderTracks(); draw(); } else renderAll();
+  requestExact();
+}
+
+function savedText() {
+  const seconds = project.output_ms / 1000;
+  return `Saved · plays in ${seconds.toFixed(1)} s${edited ? " · edited" : " · automatic"}`;
+}
+
+function setStatus(text, bad = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("bad", bad);
+}
+
+function refreshImages() {
+  const key = JSON.stringify(project.style);
+  if (key === imagesFor) return;
+  imagesFor = key;
+  const g = project.generation;
+  images.background.src = `/background.png?g=${g}`;
+  for (const pointer of POINTERS) images[pointer].src = `/sprite.png?pointer=${pointer}&g=${g}`;
+}
+for (const image of Object.values(images)) image.onload = () => draw();
+
+function sizePicture() {
+  const { width, height } = project.layout;
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+  const stage = $("stage"), room = { w: stage.clientWidth - 28, h: stage.clientHeight - 28 };
+  const fit = Math.min(room.w / width, room.h / height);
+  $("picture").style.width = `${width * fit}px`;
+  $("picture").style.height = `${height * fit}px`;
+}
+addEventListener("resize", () => { if (project) { sizePicture(); renderTracks(); draw(); } });
+
+function sampleAt(ms) {
+  const { rows, sample_ms } = project, last = rows.length / ROW - 1;
+  const at = Math.max(0, Math.min(last, ms / sample_ms)), i = Math.floor(at), j = Math.min(last, i + 1), p = at - i;
+  const mix = k => rows[i * ROW + k] + (rows[j * ROW + k] - rows[i * ROW + k]) * p;
+  return { vx: mix(0), vy: mix(1), vw: mix(2), cx: mix(3), cy: mix(4), pressed: mix(5), opacity: mix(6), pointer: rows[i * ROW + 7], size: mix(8) };
+}
+
+function placed(view, x, y) {
+  const { layout } = project, scale = layout.w / view.w;
+  return [layout.x + (x - view.x) * scale, layout.y + (y - view.y) * scale];
+}
+
+function shownView(sample) {
+  if (selected?.kind === "zoom") return { x: 0, y: 0, w: project.size[0], h: project.size[1] };
+  return { x: sample.vx, y: sample.vy, w: sample.vw, h: sample.vw * project.size[1] / project.size[0] };
+}
+
+function draw() {
+  if (!project || !images.background.complete || !images.background.naturalWidth) return;
+  const { layout, size, sprite } = project, sample = sampleAt(t), view = shownView(sample);
+  ctx.drawImage(images.background, 0, 0);
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(layout.x, layout.y, layout.w, layout.h, layout.radius);
+  ctx.clip();
+  if (video.videoWidth) {
+    const k = video.videoWidth / size[0];
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(video, view.x * k, view.y * k, view.w * k, view.h * k, layout.x, layout.y, layout.w, layout.h);
+  }
+  const scale = layout.w / view.w, grow = Math.sqrt(scale);
+  for (const click of timeline.clicks) {
+    const p = (t - click.at_ms) / RIPPLE_MS;
+    if (!style.clicks.ripple || p < 0 || p >= 1) continue;
+    const [x, y] = placed(view, click.x, click.y);
+    ctx.beginPath();
+    ctx.arc(x, y, (12 + 30 * p) * grow, 0, Math.PI * 2);
+    if (style.clicks.style === "filled") {
+      ctx.fillStyle = style.clicks.color; ctx.globalAlpha = (1 - p) * 115 / 255; ctx.fill();
+    } else {
+      ctx.strokeStyle = style.clicks.color; ctx.globalAlpha = (1 - p) * 230 / 255; ctx.lineWidth = 3 * grow; ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+  if (style.cursor.show && sample.opacity > 0) {
+    const [x, y] = placed(view, sample.cx, sample.cy);
+    const inside = x >= layout.x && x <= layout.x + layout.w && y >= layout.y && y <= layout.y + layout.h;
+    const image = images[POINTERS[sample.pointer]];
+    if (inside && image.complete && image.naturalWidth) {
+      const k = sample.size / sprite.scale;
+      ctx.globalAlpha = sample.opacity;
+      ctx.drawImage(image, x - sprite.tip * k, y - sprite.tip * k, sprite.size * k, sprite.size * k);
+      ctx.globalAlpha = 1;
+    }
+  }
+  drawGuides(view);
+  updateClock();
+}
+
+function drawGuides(view) {
+  if (!selected) return;
+  const item = selectedItem();
+  if (!item) return;
+  ctx.save();
+  if (selected.kind === "zoom") {
+    const r = zoomRect(item), [x, y] = placed(view, r.x, r.y), k = project.layout.w / view.w;
+    const { layout } = project;
+    ctx.fillStyle = "rgba(10,16,15,.55)";
+    ctx.beginPath();
+    ctx.rect(layout.x, layout.y, layout.w, layout.h);
+    ctx.rect(x, y, r.w * k, r.h * k);
+    ctx.fill("evenodd");
+    ctx.strokeStyle = "#f6c944"; ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, r.w * k, r.h * k);
+  } else if (selected.kind === "click") {
+    const [x, y] = placed(view, item.x, item.y);
+    ctx.strokeStyle = "#f6c944"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI * 2);
+    ctx.moveTo(x - 26, y); ctx.lineTo(x - 10, y); ctx.moveTo(x + 10, y); ctx.lineTo(x + 26, y);
+    ctx.moveTo(x, y - 26); ctx.lineTo(x, y - 10); ctx.moveTo(x, y + 10); ctx.lineTo(x, y + 26);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function zoomRect(zoom) {
+  const [W, H] = project.size, w = W / zoom.level, h = H / zoom.level;
+  return { x: Math.max(0, Math.min(W - w, zoom.x - w / 2)), y: Math.max(0, Math.min(H - h, zoom.y - h / 2)), w, h };
+}
+
+const mmss = ms => {
+  const s = Math.max(0, ms) / 1000, m = Math.floor(s / 60);
+  return `${String(m).padStart(2, "0")}:${(s - m * 60).toFixed(2).padStart(5, "0")}`;
+};
+
+function outputAt(ms) {
+  let cut = 0;
+  for (const span of timeline.speeds) {
+    if (ms <= span.start_ms) break;
+    const inside = Math.min(ms, span.end_ms) - span.start_ms;
+    cut += span.speed === null ? inside : inside - inside / span.speed;
+  }
+  return ms - cut;
+}
+
+function updateClock() {
+  $("clock").innerHTML = `${mmss(t)} / ${mmss(project.duration_ms)}<small>plays at ${mmss(outputAt(t))} of ${mmss(project.output_ms)}</small>`;
+  $("head").style.left = `${xOf(t)}px`;
+}
+
+const tracksWidth = () => $("film").clientWidth;
+const xOf = ms => ms / project.duration_ms * tracksWidth();
+const msOf = clientX => Math.max(0, Math.min(project.duration_ms, (clientX - $("film").getBoundingClientRect().left) / tracksWidth() * project.duration_ms));
+
+function renderTracks() {
+  const ruler = $("ruler"), step = [500, 1000, 2000, 5000, 10000, 30000, 60000].find(s => xOf(s) >= 56) ?? 120000;
+  ruler.replaceChildren();
+  for (let ms = 0; ms < project.duration_ms; ms += step) {
+    const tick = document.createElement("span");
+    tick.style.left = `${xOf(ms)}px`;
+    tick.textContent = mmss(ms).replace(/\.00$/, "");
+    ruler.append(tick);
+  }
+  const mark = (kind, i, start, end, text, extra = "") => {
+    const el = document.createElement("button");
+    el.className = `mark ${kind} ${extra}`;
+    el.style.left = `${xOf(start)}px`;
+    el.style.width = `${xOf(end - start)}px`;
+    el.textContent = text;
+    el.dataset.kind = kind; el.dataset.i = i;
+    el.setAttribute("aria-pressed", selected?.kind === kind && selected.i === i);
+    el.setAttribute("aria-label", `${kind} ${text} from ${mmss(start)} to ${mmss(end)}`);
+    return el;
+  };
+  $("lane-zoom").replaceChildren(...timeline.zooms.map((z, i) => mark("zoom", i, z.start_ms, Math.min(z.end_ms, project.duration_ms), `${z.level.toFixed(1)}×`)));
+  $("lane-speed").replaceChildren(...timeline.speeds.map((s, i) => mark("speed", i, s.start_ms, s.end_ms, s.speed === null ? "cut" : `${+s.speed.toFixed(1)}×`, s.speed === null ? "cut" : "")));
+  $("lane-click").replaceChildren(...timeline.clicks.map((c, i) => {
+    const el = document.createElement("button");
+    el.className = "dot";
+    el.style.left = `${xOf(c.at_ms)}px`;
+    el.dataset.kind = "click"; el.dataset.i = i;
+    el.setAttribute("aria-pressed", selected?.kind === "click" && selected.i === i);
+    el.setAttribute("aria-label", `click at ${mmss(c.at_ms)}`);
+    return el;
+  }));
+}
+
+const listOf = kind => ({ zoom: timeline.zooms, speed: timeline.speeds, click: timeline.clicks })[kind];
+const selectedItem = () => selected && listOf(selected.kind)[selected.i];
+
+function select(kind, i) {
+  selected = kind === null ? null : { kind, i };
+  renderSelection();
+  renderTracks();
+  draw();
+  requestExact();
+}
+
+function edit(change) {
+  remember();
+  edited = true;
+  change();
+  commit();
+}
+
+function commit() {
+  renderSelection();
+  renderTracks();
+  draw();
+  send();
+}
+
+function linkedMove(click) {
+  return timeline.moves.find(m => Math.abs(m.end_ms - (click.at_ms - ARRIVES_EARLY_MS)) < 1);
+}
+
+function gapAround(list, ms, exceptIndex = -1) {
+  let from = 0, to = project.duration_ms;
+  list.forEach((item, i) => {
+    if (i === exceptIndex) return;
+    if (item.end_ms <= ms) from = Math.max(from, item.end_ms);
+    else if (item.start_ms >= ms) to = Math.min(to, item.start_ms);
+    else { from = item.end_ms; to = item.end_ms; }
+  });
+  return [from, to];
+}
+
+function addSpan(kind, ms, make) {
+  const list = listOf(kind), [from, to] = gapAround(list, ms);
+  if (to - from < MIN_MARK_MS) { setStatus(`No room for a ${kind} here: move the playhead to a free stretch.`, true); return; }
+  const start = Math.max(from, Math.min(ms, to - 2000)), end = Math.min(to, start + 2000);
+  edit(() => {
+    list.push(make(start, end));
+    list.sort((a, b) => a.start_ms - b.start_ms);
+    selected = { kind, i: list.findIndex(item => item.start_ms === start) };
+  });
+}
+
+function addZoom(ms) {
+  addSpan("zoom", ms, (start_ms, end_ms) => ({ start_ms, end_ms, x: project.size[0] / 2, y: project.size[1] / 2, level: Math.max(1.4, style.zoom.level) }));
+}
+
+function addSpeed(ms) {
+  addSpan("speed", ms, (start_ms, end_ms) => ({ start_ms, end_ms, speed: 2 }));
+}
+
+function addClick(ms) {
+  const sample = sampleAt(ms);
+  const [x, y] = project.imported ? [project.size[0] / 2, project.size[1] / 2] : [sample.cx, sample.cy];
+  edit(() => {
+    const click = { at_ms: ms, x, y };
+    timeline.clicks.push(click);
+    timeline.clicks.sort((a, b) => a.at_ms - b.at_ms);
+    const end_ms = ms - ARRIVES_EARLY_MS;
+    if (end_ms > 0 && !project.imported) {
+      const before = timeline.moves.filter(m => m.end_ms < end_ms).reduce((latest, m) => Math.max(latest, m.end_ms), 0);
+      const start_ms = Math.min(end_ms - 80, Math.max(before, end_ms - TRAVEL_MS));
+      if (start_ms >= 0) timeline.moves.push({ start_ms, end_ms, x, y, pointer: "arrow" });
+      timeline.moves.sort((a, b) => a.end_ms - b.end_ms);
+    }
+    selected = { kind: "click", i: timeline.clicks.indexOf(click) };
+  });
+}
+
+function removeSelected() {
+  if (!selected) return;
+  edit(() => {
+    const item = selectedItem();
+    if (selected.kind === "click") {
+      const others = timeline.clicks.filter(c => c !== item && Math.abs(c.at_ms - item.at_ms) < 1);
+      const move = linkedMove(item);
+      if (move && !others.length) timeline.moves.splice(timeline.moves.indexOf(move), 1);
+    }
+    listOf(selected.kind).splice(selected.i, 1);
+    selected = null;
+  });
+}
+
+function shiftClick(click, at_ms) {
+  const move = linkedMove(click);
+  if (move) {
+    const by = at_ms - click.at_ms;
+    move.end_ms += by;
+    move.start_ms = Math.max(0, move.start_ms + by);
+    if (move.start_ms >= move.end_ms) move.start_ms = Math.max(0, move.end_ms - 80);
+  }
+  click.at_ms = at_ms;
+}
+
+function onTracksDown(event) {
+  const target = event.target;
+  if (!target.dataset?.kind) {
+    if (target.closest(".lane")) select(null);
+    if (target.id === "ruler" || target.closest("#ruler") || target.id === "film") { drag = { kind: "seek" }; seek(msOf(event.clientX)); $("tracks").setPointerCapture(event.pointerId); }
+    return;
+  }
+  const kind = target.dataset.kind, i = +target.dataset.i;
+  select(kind, i);
+  const item = listOf(kind)[i], box = target.getBoundingClientRect();
+  const grab = event.clientX - box.left, part = kind === "click" ? "move" : grab < 8 ? "start" : box.right - event.clientX < 8 ? "end" : "move";
+  drag = { kind, item, part, from: msOf(event.clientX), origin: { ...item }, moved: false };
+  $("tracks").setPointerCapture(event.pointerId);
+}
+
+function onTracksMove(event) {
+  if (!drag) return;
+  const ms = msOf(event.clientX);
+  if (drag.kind === "seek") { seek(ms); return; }
+  const by = ms - drag.from;
+  if (!drag.moved && Math.abs(by) < project.duration_ms / tracksWidth() * 3) return;
+  if (!drag.moved) { drag.moved = true; remember(); edited = true; }
+  if (drag.kind === "click") {
+    shiftClick(drag.item, Math.max(0, Math.min(project.duration_ms, drag.origin.at_ms + by)));
+  } else {
+    dragSpan(by);
+  }
+  renderTracks();
+  draw();
+}
+
+function dragSpan(by) {
+  const { item, origin, part, kind } = drag, list = listOf(kind), i = list.indexOf(item);
+  const floor = i > 0 ? list[i - 1].end_ms : 0;
+  const ceiling = i < list.length - 1 ? list[i + 1].start_ms : project.duration_ms;
+  const end = Math.min(origin.end_ms, Math.max(project.duration_ms, origin.end_ms));
+  if (part === "start") item.start_ms = Math.max(floor, Math.min(item.end_ms - MIN_MARK_MS, origin.start_ms + by));
+  else if (part === "end") item.end_ms = Math.min(ceiling, Math.max(item.start_ms + MIN_MARK_MS, end + by));
+  else {
+    const length = origin.end_ms - origin.start_ms;
+    item.start_ms = Math.max(floor, Math.min(ceiling - length, origin.start_ms + by));
+    item.end_ms = item.start_ms + length;
+  }
+}
+
+function onTracksUp() {
+  if (drag?.moved) {
+    if (drag.kind === "click") timeline.clicks.sort((a, b) => a.at_ms - b.at_ms);
+    if (drag.kind === "click") selected = { kind: "click", i: timeline.clicks.indexOf(drag.item) };
+    commit();
+  }
+  drag = null;
+}
+
+function pictureSpot(event) {
+  const box = canvas.getBoundingClientRect(), k = project.layout.width / box.width;
+  const px = (event.clientX - box.left) * k, py = (event.clientY - box.top) * k;
+  const view = shownView(sampleAt(t)), scale = project.layout.w / view.w;
+  const clamp = (v, max) => Math.max(0, Math.min(max, v));
+  return [clamp(view.x + (px - project.layout.x) / scale, project.size[0]), clamp(view.y + (py - project.layout.y) / scale, project.size[1])];
+}
+
+function onPictureDown(event) {
+  const item = selectedItem();
+  if (!item || selected.kind === "speed") return;
+  const [x, y] = pictureSpot(event);
+  drag = { kind: "picture", item, grab: [x - item.x, y - item.y], moved: false };
+  if (selected.kind === "zoom") {
+    const r = zoomRect(item);
+    if (x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) drag.grab = [0, 0];
+    else { const center = [r.x + r.w / 2, r.y + r.h / 2]; drag.grab = [x - center[0], y - center[1]]; }
+  } else drag.grab = [0, 0];
+  canvas.setPointerCapture(event.pointerId);
+  onPictureMove(event);
+}
+
+function onPictureMove(event) {
+  if (drag?.kind !== "picture") return;
+  if (!drag.moved) { drag.moved = true; remember(); edited = true; }
+  const [x, y] = pictureSpot(event);
+  drag.item.x = x - drag.grab[0];
+  drag.item.y = y - drag.grab[1];
+  if (selected.kind === "zoom") {
+    const r = zoomRect(drag.item);
+    drag.item.x = r.x + r.w / 2;
+    drag.item.y = r.y + r.h / 2;
+  } else {
+    const move = linkedMove(drag.item);
+    if (move) { move.x = drag.item.x; move.y = drag.item.y; }
+  }
+  renderSelection();
+  draw();
+}
+
+function onPictureUp() {
+  if (drag?.kind === "picture") { drag = null; commit(); }
+}
+
+function seek(ms) {
+  t = ms;
+  if (!video.paused) video.pause();
+  video.currentTime = ms / 1000;
+  draw();
+  requestExact();
+}
+
+video.addEventListener("seeked", () => { if (video.paused) draw(); });
+video.addEventListener("loadeddata", () => draw());
+
+function setPlaying(playing) {
+  if (playing) {
+    if (t >= project.duration_ms - 20) { t = 0; video.currentTime = 0; }
+    hideExact();
+    video.play();
+    $("play").textContent = "Pause";
+    requestAnimationFrame(tick);
+  } else {
+    video.pause();
+    $("play").textContent = "Play";
+    requestExact();
+  }
+}
+
+function tick() {
+  if (video.paused) return;
+  t = video.currentTime * 1000;
+  const span = timeline.speeds.find(s => t >= s.start_ms && t < s.end_ms);
+  if (span?.speed === null) {
+    video.currentTime = span.end_ms / 1000;
+    video.playbackRate = 1;
+  } else {
+    video.playbackRate = span ? span.speed : 1;
+  }
+  draw();
+  requestAnimationFrame(tick);
+}
+video.addEventListener("ended", () => { t = project.duration_ms; setPlaying(false); draw(); });
+
+let exactTimer = null, exactWanted = 0;
+function hideExact() { exact.hidden = true; exactWanted++; clearTimeout(exactTimer); }
+function requestExact() {
+  hideExact();
+  if (!video.paused || !project || selected?.kind === "zoom" || selected?.kind === "click") return;
+  const wanted = exactWanted;
+  exactTimer = setTimeout(async () => {
+    const reply = await fetch(`/frame.png?ms=${t.toFixed(3)}&g=${project.generation}`);
+    if (!reply.ok || wanted !== exactWanted) return;
+    const url = URL.createObjectURL(await reply.blob());
+    if (wanted !== exactWanted) { URL.revokeObjectURL(url); return; }
+    exact.onload = () => { URL.revokeObjectURL(url); if (wanted === exactWanted) exact.hidden = false; };
+    exact.src = url;
+  }, 220);
+}
+
+function field(label, control) {
+  const row = document.createElement("div");
+  row.className = "field";
+  const name = document.createElement("label");
+  name.textContent = label;
+  if (!control.id) control.id = `f-${label.replace(/\W/g, "-")}-${Math.random().toString(36).slice(2, 7)}`;
+  name.htmlFor = control.id;
+  row.append(name, control);
+  return row;
+}
+
+function get(path) { return path.split(".").reduce((o, k) => o[k], style); }
+function set(path, value) { const keys = path.split("."), last = keys.pop(); keys.reduce((o, k) => o[k], style)[last] = value; }
+
+function beginGesture() { if (!gesture) { remember(); gesture = true; } }
+function endGesture() { gesture = false; send(); }
+
+function rangeControl(value, min, max, step, format, onInput) {
+  const wrap = document.createElement("div"), input = document.createElement("input"), out = document.createElement("output");
+  wrap.className = "range";
+  Object.assign(input, { type: "range", min, max, step, value });
+  out.textContent = format(+value);
+  input.addEventListener("input", () => { out.textContent = format(+input.value); onInput(+input.value); });
+  input.addEventListener("change", endGesture);
+  wrap.append(input, out);
+  wrap.input = input;
+  return wrap;
+}
+
+function styleRange(path, min, max, step, format) {
+  return rangeControl(get(path), min, max, step, format, value => { beginGesture(); set(path, value); send(); });
+}
+
+function styleToggle(path) {
+  const input = document.createElement("input");
+  input.type = "checkbox"; input.checked = get(path);
+  input.addEventListener("change", () => { remember(); set(path, input.checked); send(); });
+  return input;
+}
+
+function styleSegments(path, options) {
+  const seg = document.createElement("div");
+  seg.className = "seg"; seg.setAttribute("role", "group");
+  for (const [value, label] of options) {
+    const button = document.createElement("button");
+    button.textContent = label;
+    button.setAttribute("aria-pressed", get(path) === value);
+    button.addEventListener("click", () => { remember(); set(path, value); renderForm(); send(); });
+    seg.append(button);
+  }
+  return seg;
+}
+
+function styleColor(path) {
+  const input = document.createElement("input");
+  input.type = "color"; input.value = get(path);
+  input.addEventListener("input", () => { beginGesture(); set(path, input.value); send(); });
+  input.addEventListener("change", endGesture);
+  return input;
+}
+
+function fillKind(fill) {
+  if (fill === "none") return "none";
+  if (fill.includes(",")) return "gradient";
+  if (fill.startsWith("#")) return "colour";
+  return "image";
+}
+
+function fillControls(box) {
+  const fill = style.background.fill, kind = fillKind(fill);
+  const select = document.createElement("select");
+  for (const name of ["none", "colour", "gradient", "image"]) {
+    const option = new Option({ none: "None", colour: "Colour", gradient: "Gradient", image: "Image file" }[name], name);
+    select.append(option);
+  }
+  select.value = kind;
+  select.addEventListener("change", () => {
+    const next = { none: "none", colour: "#1b2b2e", gradient: "#2d1b69,#e2581f" }[select.value];
+    if (next) { remember(); style.background.fill = next; renderForm(); send(); }
+    else { renderFormWithImage = true; renderForm(); }
+  });
+  box.append(field("Fill", select));
+  if (renderFormWithImage || kind === "image") {
+    select.value = "image";
+    const path = document.createElement("input");
+    path.type = "text"; path.placeholder = "/path/to/wallpaper.jpg"; path.value = kind === "image" ? fill : "";
+    path.addEventListener("change", () => { if (path.value) { remember(); style.background.fill = path.value; renderFormWithImage = false; send(); } });
+    box.append(field("Image path", path));
+  } else if (kind !== "none") {
+    const parts = fill.split(",");
+    const colors = document.createElement("div");
+    colors.className = "colors";
+    parts.forEach((part, i) => {
+      const input = document.createElement("input");
+      input.type = "color"; input.value = part; input.setAttribute("aria-label", parts.length > 1 ? (i ? "Gradient end" : "Gradient start") : "Colour");
+      input.addEventListener("input", () => { beginGesture(); parts[i] = input.value; style.background.fill = parts.join(","); send(); });
+      input.addEventListener("change", endGesture);
+      colors.append(input);
+    });
+    box.append(field("Colours", colors));
+  }
+}
+let renderFormWithImage = false;
+
+function renderForm() {
+  const form = $("form");
+  form.replaceChildren();
+  const group = (title, build) => {
+    const section = document.createElement("section"), heading = document.createElement("h2");
+    heading.textContent = title;
+    section.append(heading);
+    build(section);
+    form.append(section);
+  };
+  const percent = v => `${Math.round(v)}%`, times = v => `${v.toFixed(2)}×`;
+  group("Camera", box => {
+    const level = styleRange("zoom.level", 1, 4, 0.05, times);
+    level.input.disabled = edited;
+    box.append(field("Zoom level", level));
+    if (edited) {
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "Sets the automatic zooms. This timeline has been edited: select a zoom to change it, or reset to automatic.";
+      box.append(hint);
+    }
+    box.append(field("Zoom motion", styleSegments("zoom.animation", [["smooth", "Smooth"], ["dynamic", "Dynamic"]])));
+    box.append(field("Motion blur", styleSegments("motion_blur", [["off", "Off"], ["low", "Low"], ["medium", "Med"], ["high", "High"]])));
+  });
+  group("Cursor", box => {
+    box.append(field("Show", styleToggle("cursor.show")));
+    if (project.imported) {
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "This video has its own cursor in the picture, which can't be removed. Turning this on draws a second one.";
+      box.append(hint);
+    }
+    box.append(field("Size", styleRange("cursor.size", 0.5, 3, 0.05, times)));
+    box.append(field("Look", styleSegments("cursor.style", [["white_arrow", "White"], ["black_arrow", "Black"], ["dot", "Dot"]])));
+    box.append(field("Movement", styleSegments("cursor.motion", [["natural", "Natural"], ["smooth", "Smooth"]])));
+    box.append(field("Hand and text", styleToggle("cursor.adaptive")));
+    box.append(field("Hide when idle", styleToggle("cursor.hide_when_idle")));
+    box.append(field("Hide on typing", styleToggle("cursor.hide_when_typing")));
+  });
+  group("Clicks", box => {
+    box.append(field("Press", styleToggle("clicks.press")));
+    box.append(field("Ripple", styleToggle("clicks.ripple")));
+    box.append(field("Colour", styleColor("clicks.color")));
+    box.append(field("Ripple style", styleSegments("clicks.style", [["filled", "Filled"], ["outline", "Outline"]])));
+  });
+  group("Background", box => {
+    fillControls(box);
+    const aspect = document.createElement("select");
+    for (const value of ["auto", "16:9", "4:3", "1:1", "9:16"]) aspect.append(new Option(value === "auto" ? "Same as video" : value, value));
+    aspect.value = style.background.aspect;
+    aspect.addEventListener("change", () => { remember(); style.background.aspect = aspect.value; send(); });
+    box.append(field("Shape", aspect));
+    box.append(field("Padding", styleRange("background.padding", 0, 30, 0.5, percent)));
+    box.append(field("Shadow", styleRange("background.shadow", 0, 100, 1, percent)));
+    box.append(field("Corners", styleRange("background.corners", 0, 15, 0.1, percent)));
+  });
+}
+
+function renderSelection() {
+  const box = $("selection"), item = selectedItem();
+  box.className = selected?.kind ?? "";
+  box.replaceChildren();
+  const heading = document.createElement("h2");
+  box.append(heading);
+  const note = text => { const p = document.createElement("p"); p.textContent = text; box.append(p); };
+  const remove = () => { const b = document.createElement("button"); b.textContent = "Remove"; b.addEventListener("click", removeSelected); box.append(b); };
+  if (!item) {
+    heading.textContent = "Timeline";
+    note("Select a mark to change it, drag it to move it, or drag its edge to resize it. Double-click a lane to add one.");
+    return;
+  }
+  if (selected.kind === "zoom") {
+    heading.textContent = `Zoom · ${mmss(item.start_ms)} to ${mmss(item.end_ms)}`;
+    note("Drag the frame on the picture to choose what the camera shows. Zooms that touch pan without zooming out.");
+    box.append(field("Level", rangeControl(item.level, 1, 4, 0.05, v => `${v.toFixed(2)}×`, value => { beginGesture(); edited = true; item.level = value; renderTracks(); draw(); send(); })));
+  } else if (selected.kind === "speed") {
+    heading.textContent = `Speed · ${mmss(item.start_ms)} to ${mmss(item.end_ms)}`;
+    const cut = document.createElement("input");
+    cut.type = "checkbox"; cut.checked = item.speed === null;
+    cut.addEventListener("change", () => edit(() => { item.speed = cut.checked ? null : 2; }));
+    box.append(field("Cut it out", cut));
+    if (item.speed !== null) {
+      box.append(field("Speed", rangeControl(item.speed, 0.25, 16, 0.25, v => `${v.toFixed(2)}×`, value => { beginGesture(); edited = true; item.speed = value; renderTracks(); send(); })));
+    }
+  } else {
+    heading.textContent = `Click · ${mmss(item.at_ms)}`;
+    note("Drag on the picture to place it.");
+  }
+  remove();
+}
+
+function updateButtons() {
+  $("undo").disabled = !undoStack.length;
+  $("redo").disabled = !redoStack.length;
+  $("reset").disabled = !edited;
+}
+
+function renderAll() {
+  renderForm();
+  renderSelection();
+  renderTracks();
+  updateButtons();
+  draw();
+}
+
+$("play").addEventListener("click", () => setPlaying(video.paused));
+$("add-zoom").addEventListener("click", () => addZoom(t));
+$("add-speed").addEventListener("click", () => addSpeed(t));
+$("add-click").addEventListener("click", () => addClick(t));
+$("undo").addEventListener("click", () => { if (undoStack.length) { redoStack.push(snapshot()); restore(undoStack.pop()); } });
+$("redo").addEventListener("click", () => { if (redoStack.length) { undoStack.push(snapshot()); restore(redoStack.pop()); } });
+$("reset").addEventListener("click", async () => {
+  remember();
+  selected = null;
+  setStatus("Resetting…");
+  try { adopt(await api("/api/auto", {})); setStatus(savedText()); } catch (error) { setStatus(error.message, true); }
+});
+const tracks = $("tracks");
+tracks.addEventListener("pointerdown", onTracksDown);
+tracks.addEventListener("pointermove", onTracksMove);
+tracks.addEventListener("pointerup", onTracksUp);
+tracks.addEventListener("dblclick", event => {
+  if (event.target.id === "lane-zoom") addZoom(msOf(event.clientX));
+  if (event.target.id === "lane-speed") addSpeed(msOf(event.clientX));
+  if (event.target.id === "lane-click") addClick(msOf(event.clientX));
+});
+canvas.addEventListener("pointerdown", onPictureDown);
+canvas.addEventListener("pointermove", onPictureMove);
+canvas.addEventListener("pointerup", onPictureUp);
+
+addEventListener("keydown", event => {
+  if (event.target.matches("input[type=text], input[type=number], select")) return;
+  const frame = 1000 / project.fps, command = event.metaKey || event.ctrlKey;
+  if (command && event.key.toLowerCase() === "z") { event.preventDefault(); $(event.shiftKey ? "redo" : "undo").click(); }
+  else if (command) return;
+  else if (event.key === " ") { event.preventDefault(); setPlaying(video.paused); }
+  else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    if (event.target.matches("input[type=range]")) return;
+    event.preventDefault();
+    const step = (event.shiftKey ? 1000 : frame) * (event.key === "ArrowLeft" ? -1 : 1);
+    seek(Math.max(0, Math.min(project.duration_ms, t + step)));
+  }
+  else if (event.key === "Backspace" || event.key === "Delete") removeSelected();
+  else if (event.key === "Escape") select(null);
+  else if (event.key === "z") addZoom(t);
+  else if (event.key === "s") addSpeed(t);
+  else if (event.key === "c") addClick(t);
+});
+
+let renderTimer = null;
+async function watchRender() {
+  const job = await api("/api/render");
+  if (job.running) {
+    $("render").textContent = `Rendering ${Math.round(job.progress * 100)}%`;
+    renderTimer = setTimeout(watchRender, 400);
+    return;
+  }
+  $("render").disabled = false;
+  $("render").textContent = "Render";
+  if (job.error) setStatus(`The render failed: ${job.error}`, true);
+  if (job.finished) {
+    setStatus(`Rendered to ${job.output}`);
+    $("result").hidden = false;
+    $("result").href = `/output.mp4?t=${Date.now()}`;
+  }
+}
+$("render").addEventListener("click", async () => {
+  $("render").disabled = true;
+  $("result").hidden = true;
+  try { await api("/api/render", {}); watchRender(); }
+  catch (error) { $("render").disabled = false; setStatus(error.message, true); }
+});
+
+(async () => {
+  try {
+    const first = await api("/api/project");
+    document.title = `reel · ${first.name}`;
+    $("name").textContent = first.name;
+    adopt(first);
+    setStatus(savedText());
+    const job = await api("/api/render");
+    if (job.running) { $("render").disabled = true; watchRender(); }
+  } catch (error) { setStatus(error.message, true); }
+})();
+</script>
+</body>
+</html>
