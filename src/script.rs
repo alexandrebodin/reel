@@ -18,7 +18,8 @@ pub struct Script {
     pub steps: Vec<Step>,
 }
 
-/// `target` is a CSS selector, or `text=Label` for the visible text of a button, link or menu item.
+/// `target` is a CSS selector, or `text=Label` for the visible text of a button, link or menu item
+/// (the topmost one when several match).
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Step {

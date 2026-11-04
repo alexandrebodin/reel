@@ -161,7 +161,8 @@ const LOCATE_JS: &str = r#"(target) => {
     const want = target.slice(5).trim();
     const label = (c) => (c.innerText || c.value || c.getAttribute('aria-label') || '').trim();
     const clickable = 'button, a, summary, label, [role=button], [role=menuitem], [role=option], [role=radio], [role=tab], [role=checkbox]';
-    el = [...document.querySelectorAll(clickable)].find((c) => visible(c) && label(c) === want) ?? null;
+    // The last match is the topmost layer: menus and dialogs render at the end of the page.
+    el = [...document.querySelectorAll(clickable)].reverse().find((c) => visible(c) && label(c) === want) ?? null;
   } else {
     el = [...document.querySelectorAll(target)].find(visible) ?? null;
   }
