@@ -45,7 +45,7 @@ aside h2 { font: 700 13px var(--label); letter-spacing: .08em; text-transform: u
 #selection.click h2 { color: var(--paper); }
 #selection p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
 .field { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; margin-bottom: 7px; font-size: 13px; }
-.field > label, .field > span.name { color: var(--paper); }
+.field > label { color: var(--paper); }
 .field output { font: 11px var(--time); color: var(--muted); }
 .range { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; align-items: center; }
 input[type=range] { width: 100%; accent-color: var(--pencil); margin: 0; }
@@ -67,9 +67,9 @@ footer { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 0 14px
 .lane { position: relative; height: 28px; margin-top: 4px; background: var(--well); border-radius: 2px; }
 .lane::before { content: attr(data-name); position: absolute; left: 6px; top: 6px; font: 700 11px var(--label); letter-spacing: .08em; text-transform: uppercase; color: var(--rule); pointer-events: none; }
 .mark { position: absolute; top: 2px; bottom: 2px; min-width: 6px; padding: 0 9px; border: 2px solid; border-radius: 3px; background: none; font: 700 12px var(--label); overflow: hidden; white-space: nowrap; cursor: grab; text-align: left; }
-.mark.zoom { border-color: var(--pencil); color: var(--pencil); background: #f6c94422; }
-.mark.speed { border-color: var(--wax); color: var(--wax); background: #ff7f5c22; }
-.mark.cut { background: repeating-linear-gradient(135deg, #ff7f5c44 0 5px, transparent 5px 10px); }
+.mark.zoom { border-color: var(--pencil); color: var(--pencil); background: #3b3a22; }
+.mark.speed { border-color: var(--wax); color: var(--wax); background: #40291f; }
+.mark.cut { background: repeating-linear-gradient(135deg, #6b3a2b 0 5px, var(--well) 5px 10px); }
 .mark[aria-pressed=true] { box-shadow: 0 0 0 2px var(--paper); }
 .mark::before, .mark::after { content: ""; position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
 .mark::before { left: 0; } .mark::after { right: 0; }
@@ -136,7 +136,7 @@ let imagesFor = null, sending = false, pending = false;
 
 const snapshot = () => JSON.stringify({ style, timeline, edited });
 function remember() { undoStack.push(snapshot()); redoStack = []; updateButtons(); }
-function restore(text) { ({ style, timeline, edited } = JSON.parse(text)); selected = null; renderAll(); send(); }
+function restore(text) { ({ style, timeline, edited } = JSON.parse(text)); selected = null; renderAll(); updateButtons(); send(); }
 
 async function api(path, body) {
   const reply = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -464,9 +464,9 @@ function onTracksDown(event) {
     if (target.id === "ruler" || target.closest("#ruler") || target.id === "film") { drag = { kind: "seek" }; seek(msOf(event.clientX)); $("tracks").setPointerCapture(event.pointerId); }
     return;
   }
-  const kind = target.dataset.kind, i = +target.dataset.i;
+  const kind = target.dataset.kind, i = +target.dataset.i, box = target.getBoundingClientRect();
   select(kind, i);
-  const item = listOf(kind)[i], box = target.getBoundingClientRect();
+  const item = listOf(kind)[i];
   const grab = event.clientX - box.left, part = kind === "click" ? "move" : grab < 8 ? "start" : box.right - event.clientX < 8 ? "end" : "move";
   drag = { kind, item, part, from: msOf(event.clientX), origin: { ...item }, moved: false };
   $("tracks").setPointerCapture(event.pointerId);
@@ -492,9 +492,8 @@ function dragSpan(by) {
   const { item, origin, part, kind } = drag, list = listOf(kind), i = list.indexOf(item);
   const floor = i > 0 ? list[i - 1].end_ms : 0;
   const ceiling = i < list.length - 1 ? list[i + 1].start_ms : project.duration_ms;
-  const end = Math.min(origin.end_ms, Math.max(project.duration_ms, origin.end_ms));
   if (part === "start") item.start_ms = Math.max(floor, Math.min(item.end_ms - MIN_MARK_MS, origin.start_ms + by));
-  else if (part === "end") item.end_ms = Math.min(ceiling, Math.max(item.start_ms + MIN_MARK_MS, end + by));
+  else if (part === "end") item.end_ms = Math.min(ceiling, Math.max(item.start_ms + MIN_MARK_MS, origin.end_ms + by));
   else {
     const length = origin.end_ms - origin.start_ms;
     item.start_ms = Math.max(floor, Math.min(ceiling - length, origin.start_ms + by));
