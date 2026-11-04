@@ -14,6 +14,7 @@ use crate::capture::Recording;
 use crate::events::Pointer;
 use crate::plan::{Cursor, Plan, Ripple, Size, View};
 use crate::style::{Aspect, Background, CursorLook, Fill, Rgb, RippleStyle, Style};
+use crate::timeline::Timeline;
 
 /// The output frame and where the video sits in it, in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -445,7 +446,7 @@ fn compose_all(compositor: &Compositor, plan: &Plan, batch: &[(Arc<Pixmap>, Vec<
 
 pub fn plan_for(recording: &Recording) -> Plan {
     let size = Size { w: recording.size[0] as f64, h: recording.size[1] as f64 };
-    Plan::new(&recording.events, recording.duration_ms, size, &recording.style)
+    Plan::new(&Timeline::auto(&recording.events, recording.duration_ms, size, &recording.style), recording.duration_ms, size, &recording.style)
 }
 
 #[cfg(test)]

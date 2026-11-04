@@ -5,6 +5,7 @@ pub mod render;
 pub mod screencast;
 pub mod script;
 pub mod style;
+pub mod timeline;
 
 use std::fs;
 use std::path::{Path, PathBuf};
