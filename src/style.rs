@@ -11,6 +11,30 @@ pub struct Style {
     pub zoom: Zoom,
     pub background: Background,
     pub cursor: CursorStyle,
+    pub clicks: Clicks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RippleStyle {
+    Filled,
+    Outline,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Clicks {
+    /// The cursor shrinks a little while the button is down.
+    pub press: bool,
+    pub ripple: bool,
+    pub color: Rgb,
+    pub style: RippleStyle,
+}
+
+impl Default for Clicks {
+    fn default() -> Clicks {
+        Clicks { press: true, ripple: true, color: Rgb([255, 106, 61]), style: RippleStyle::Filled }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -320,6 +344,16 @@ mod tests {
         assert!(style.cursor.hide_when_typing);
         assert!(with(&["cursor.size=0"]).is_err());
         assert!(with(&["cursor.style=hand"]).is_err());
+    }
+
+    #[test]
+    fn reads_click_options() {
+        let style = with(&["clicks.press=false", "clicks.color=blue", "clicks.style=outline"]).unwrap();
+
+        assert!(!style.clicks.press);
+        assert_eq!(style.clicks.color, Rgb([10, 132, 255]));
+        assert_eq!(style.clicks.style, RippleStyle::Outline);
+        assert!(with(&["clicks.color=mauve"]).is_err());
     }
 
     #[test]

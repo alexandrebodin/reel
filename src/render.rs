@@ -12,7 +12,7 @@ use tiny_skia::{
 
 use crate::capture::Recording;
 use crate::plan::{Cursor, Plan, Ripple, Size, View};
-use crate::style::{Aspect, Background, CursorLook, Fill, Rgb, Style};
+use crate::style::{Aspect, Background, CursorLook, Fill, Rgb, RippleStyle, Style};
 
 /// The output frame and where the video sits in it, in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -104,10 +104,19 @@ impl Compositor {
             let (x, y) = place(ripple.x, ripple.y);
             let progress = ripple.progress as f32;
             let radius = (12.0 + 30.0 * progress) * self.density * magnification.sqrt();
-            if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
-                let mut fill = Paint { anti_alias: true, ..Paint::default() };
-                fill.set_color(color(ACCENT, ((1.0 - progress) * 115.0) as u8));
-                out.fill_path(&circle, &fill, FillRule::Winding, Transform::identity(), Some(&self.video_mask));
+            let Some(circle) = PathBuilder::from_circle(x, y, radius) else { continue };
+            let clicks = &self.style.clicks;
+            let mut paint = Paint { anti_alias: true, ..Paint::default() };
+            match clicks.style {
+                RippleStyle::Filled => {
+                    paint.set_color(color(clicks.color, ((1.0 - progress) * 115.0) as u8));
+                    out.fill_path(&circle, &paint, FillRule::Winding, Transform::identity(), Some(&self.video_mask));
+                }
+                RippleStyle::Outline => {
+                    paint.set_color(color(clicks.color, ((1.0 - progress) * 230.0) as u8));
+                    let stroke = Stroke { width: 3.0 * self.density * magnification.sqrt(), ..Stroke::default() };
+                    out.stroke_path(&circle, &paint, &stroke, Transform::identity(), Some(&self.video_mask));
+                }
             }
         }
 
@@ -142,7 +151,6 @@ impl Compositor {
     }
 }
 
-const ACCENT: Rgb = Rgb([255, 106, 61]);
 const CURSOR_SIZE: f32 = 26.0;
 
 fn fill_pixmap(fill: &Fill, width: u32, height: u32) -> Result<Pixmap> {
@@ -315,7 +323,7 @@ pub fn plan_for(recording: &Recording) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::CursorStyle;
+    use crate::style::{Clicks, CursorStyle};
     use tiny_skia::Color;
 
     const RED: Rgb = Rgb([220, 30, 30]);
@@ -622,6 +630,26 @@ mod tests {
         assert!(rgb(&out, 60, 30).0[0] < 128, "center is {:?}", rgb(&out, 60, 30));
         assert!(rgb(&out, 56, 30).0[0] < 128, "left of center is {:?}", rgb(&out, 56, 30));
         assert_eq!(rgb(&out, 80, 30), WHITE);
+    }
+
+    #[test]
+    fn colours_a_ripple_and_leaves_an_outline_hollow() {
+        let ripple = Ripple { x: 100.0, y: 50.0, progress: 0.2 };
+        let frame = |clicks: Clicks| {
+            let style = Style { clicks, ..flat(BLACK) };
+            compositor([200, 100], 1, &style).compose(&white_frame(), FULL, None, &[ripple])
+        };
+        let blue = Rgb([0, 0, 255]);
+
+        let filled = frame(Clicks { color: blue, ..Clicks::default() });
+        let outline = frame(Clicks { color: blue, style: RippleStyle::Outline, ..Clicks::default() });
+
+        let center = rgb(&filled, 100, 50).0;
+        assert!(center[2] > center[0] && center[0] < 255, "filled center is {center:?}");
+        assert_eq!(rgb(&outline, 100, 50), WHITE, "the outline filled its center");
+        let radius = 18;
+        let edge = rgb(&outline, 100 + radius, 50).0;
+        assert!(edge[0] < 200, "the outline has no edge at {radius}: {edge:?}");
     }
 
     #[test]

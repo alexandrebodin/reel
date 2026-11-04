@@ -1,5 +1,5 @@
 use crate::events::{Event, Rect};
-use crate::style::{CursorMotion, CursorStyle, Style};
+use crate::style::{Clicks, CursorMotion, CursorStyle, Style};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -78,6 +78,7 @@ pub struct Plan {
     clicks: Vec<(f64, (f64, f64))>,
     typing: Vec<(f64, f64)>,
     cursor_style: CursorStyle,
+    click_style: Clicks,
 }
 
 struct Move {
@@ -112,6 +113,7 @@ impl Plan {
                 })
                 .collect(),
             cursor_style: style.cursor.clone(),
+            click_style: style.clicks.clone(),
         }
     }
 
@@ -149,7 +151,7 @@ impl Plan {
             }
             position = m.to;
         }
-        let pressed = self.clicks.iter().map(|(at, _)| press_amount(t_ms - at)).fold(0.0, f64::max);
+        let pressed = if self.click_style.press { self.clicks.iter().map(|(at, _)| press_amount(t_ms - at)).fold(0.0, f64::max) } else { 0.0 };
         Cursor { x: position.0, y: position.1, pressed, opacity: self.cursor_opacity(t_ms) }
     }
 
@@ -169,6 +171,9 @@ impl Plan {
     }
 
     pub fn ripples_at(&self, t_ms: f64) -> Vec<Ripple> {
+        if !self.click_style.ripple {
+            return Vec::new();
+        }
         self.clicks
             .iter()
             .filter(|(at, _)| t_ms >= *at && t_ms < at + RIPPLE_MS)
@@ -733,6 +738,15 @@ mod tests {
         assert_eq!(ripples.len(), 1);
         assert!(ripples[0].progress > 0.0 && ripples[0].progress < 1.0);
         assert!(plan.ripples_at(4_000.0).is_empty());
+    }
+
+    #[test]
+    fn leaves_out_the_press_and_the_ripple_when_turned_off() {
+        let clicks = Clicks { press: false, ripple: false, ..Clicks::default() };
+        let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &Style { clicks, ..Style::default() });
+
+        assert_eq!(plan.cursor_at(2_050.0).pressed, 0.0);
+        assert!(plan.ripples_at(2_200.0).is_empty());
     }
 
     #[test]
