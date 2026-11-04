@@ -160,6 +160,7 @@ pub fn import(video: &Path) -> Result<PathBuf> {
         style,
         timeline: None,
         imported: true,
+        cuts: Vec::new(),
     };
     recording.timeline = Some(analyze(&recording)?.validated(probe.duration_ms)?);
     fs::create_dir_all(&dir)?;

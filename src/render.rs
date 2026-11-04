@@ -631,7 +631,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style: Style::default(), timeline: None, imported: false };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style: Style::default(), timeline: None, imported: false, cuts: vec![] };
         let output = dir.join("out.mp4");
 
         render(&recording, &plan_for(&recording), &output).unwrap();
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn plans_a_saved_timeline_instead_of_the_automatic_pass() {
         let click = crate::events::Event::Click { at_ms: 500.0, target: crate::events::Rect { x: 10.0, y: 10.0, w: 20.0, h: 20.0 }, frame: crate::events::Rect { x: 10.0, y: 10.0, w: 20.0, h: 20.0 }, pointer: Pointer::Arrow };
-        let mut recording = Recording { video: "raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![click], style: Style::default(), timeline: None, imported: false };
+        let mut recording = Recording { video: "raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![click], style: Style::default(), timeline: None, imported: false, cuts: vec![] };
         assert!(plan_for(&recording).camera_at(1_500.0).w < 320.0, "the automatic pass did not zoom");
 
         recording.timeline = Some(crate::timeline::Timeline::default());
@@ -684,7 +684,7 @@ mod tests {
         let filter = "color=red:s=64x36:r=10:d=1[a];color=blue:s=64x36:r=10:d=1[b];[a][b]concat=n=2:v=1[out]";
         let made = Command::new("ffmpeg").args(["-v", "error", "-y", "-filter_complex", filter, "-map", "[out]", "-pix_fmt", "yuv420p"]).arg(&video).status().unwrap();
         assert!(made.success());
-        let recording = Recording { video, size: [64, 36], scale: 1, fps: 10, duration_ms: 2_000.0, events: vec![], style: flat(BLACK), timeline: None, imported: false };
+        let recording = Recording { video, size: [64, 36], scale: 1, fps: 10, duration_ms: 2_000.0, events: vec![], style: flat(BLACK), timeline: None, imported: false, cuts: vec![] };
 
         let early = read_source_frame(&recording, 200.0).unwrap();
         let late = read_source_frame(&recording, 1_700.0).unwrap();
@@ -702,7 +702,7 @@ mod tests {
     fn snaps_a_source_time_to_the_output_frame_that_shows_it() {
         let speeds = vec![crate::timeline::SpeedSpan { start_ms: 1_000.0, end_ms: 3_000.0, speed: Some(2.0) }];
         let timeline = crate::timeline::Timeline { speeds, ..Default::default() };
-        let recording = Recording { video: "raw.mp4".into(), size: [64, 36], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![], style: Style::default(), timeline: Some(timeline), imported: false };
+        let recording = Recording { video: "raw.mp4".into(), size: [64, 36], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![], style: Style::default(), timeline: Some(timeline), imported: false, cuts: vec![] };
         let plan = plan_for(&recording);
 
         assert_eq!(snapped_to_frame(&recording, &plan, 550.0), (500.0, 500.0));
@@ -821,7 +821,7 @@ mod tests {
             .unwrap();
         assert!(made.success());
         let style = Style { background: Background { aspect: Aspect::Ratio(1, 1), ..Background::default() }, ..Style::default() };
-        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style, timeline: None, imported: false };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style, timeline: None, imported: false, cuts: vec![] };
         let output = dir.join("out.mp4");
 
         render(&recording, &plan_for(&recording), &output).unwrap();

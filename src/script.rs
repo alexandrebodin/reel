@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::style::{Fill, Style};
 
@@ -30,7 +30,7 @@ pub struct Script {
 
 /// `target` is a CSS selector, or `text=Label` for the visible text of a button, link or menu item
 /// (the topmost one when several match).
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Step {
     Click { target: String },

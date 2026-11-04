@@ -73,6 +73,14 @@ pub struct Typing {
     pub end_ms: f64,
 }
 
+/// A stretch of the take to leave out whatever else the timeline does there.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cut {
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
 pub const ZOOM_IN_MS: f64 = 700.0;
 pub const UNZOOM_MS: f64 = 600.0;
 pub const CURSOR_ARRIVES_EARLY_MS: f64 = 120.0;
@@ -102,7 +110,13 @@ pub fn cursor_start(frame: Size) -> (f64, f64) {
 impl Timeline {
     /// The automatic pass over a take's event log.
     pub fn auto(events: &[Event], duration_ms: f64, frame: Size, style: &Style) -> Timeline {
-        let (zooms, moves) = choreograph(events, duration_ms, cursor_start(frame), frame, style);
+        Timeline::auto_around_cuts(events, duration_ms, frame, style, &[])
+    }
+
+    /// The automatic pass for a take with stretches left out: the camera answers to what the viewer
+    /// sees, so a long wait that plays as a short one does not make it zoom out.
+    pub fn auto_around_cuts(events: &[Event], duration_ms: f64, frame: Size, style: &Style, cuts: &[Cut]) -> Timeline {
+        let (zooms, moves) = choreograph(events, duration_ms, cursor_start(frame), frame, style, cuts);
         let clicks = events.iter().filter_map(|e| match e {
             Event::Click { at_ms, target, .. } => {
                 let (x, y) = target.center();
@@ -114,11 +128,39 @@ impl Timeline {
             Event::Type { at_ms, until_ms, .. } => Some(Typing { start_ms: *at_ms, end_ms: *until_ms }),
             _ => None,
         });
-        Timeline { zooms, speeds: auto_speeds(events, duration_ms), moves, clicks: clicks.collect(), typing: typing.collect() }
+        Timeline { zooms, speeds: auto_speeds(events, duration_ms), moves, clicks: clicks.collect(), typing: typing.collect() }.with_cuts(cuts, duration_ms)
     }
 }
 
 impl Timeline {
+    /// Applies cuts over the speed changes, trimming any they overlap.
+    pub fn with_cuts(mut self, cuts: &[Cut], duration_ms: f64) -> Timeline {
+        let mut merged: Vec<Cut> = cuts.iter().map(|c| Cut { start_ms: c.start_ms.max(0.0), end_ms: c.end_ms.min(duration_ms) }).filter(|c| c.end_ms > c.start_ms).collect();
+        merged.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+        merged.dedup_by(|later, earlier| {
+            let overlaps = later.start_ms <= earlier.end_ms;
+            if overlaps {
+                earlier.end_ms = earlier.end_ms.max(later.end_ms);
+            }
+            overlaps
+        });
+        for cut in &merged {
+            let mut kept = Vec::new();
+            for span in self.speeds {
+                if span.start_ms < cut.start_ms {
+                    kept.push(SpeedSpan { end_ms: span.end_ms.min(cut.start_ms), ..span });
+                }
+                if span.end_ms > cut.end_ms {
+                    kept.push(SpeedSpan { start_ms: span.start_ms.max(cut.end_ms), ..span });
+                }
+            }
+            kept.push(SpeedSpan { start_ms: cut.start_ms, end_ms: cut.end_ms, speed: None });
+            self.speeds = kept;
+        }
+        self.speeds.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+        self
+    }
+
     /// Checks a timeline that came from outside and puts each track in time order.
     pub fn validated(mut self, duration_ms: f64) -> Result<Timeline> {
         self.zooms.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
@@ -205,7 +247,7 @@ impl Camera {
 /// Decides the camera and the cursor together, because one rule ties them: the cursor only travels
 /// through what the viewer can see, so a target out of view means zooming out first. The camera
 /// comes back in once the click has landed, and stays still for anything already in view.
-fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), frame: Size, style: &Style) -> (Vec<ZoomSpan>, Vec<Move>) {
+fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), frame: Size, style: &Style, cuts: &[Cut]) -> (Vec<ZoomSpan>, Vec<Move>) {
     let pauses = pauses(events);
     let mut actions: Vec<&Event> = events.iter().filter(|e| e.camera_frame().is_some()).collect();
     actions.sort_by(|a, b| a.at_ms().total_cmp(&b.at_ms()));
@@ -218,8 +260,8 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         let arrive_ms = event.at_ms() - CURSOR_ARRIVES_EARLY_MS;
         let mut travel_ms = (arrive_ms - CURSOR_TRAVEL_MS).max(free_from);
         let target_hidden = event.cursor_target().is_some_and(|t| !in_view(camera.shown, t));
-        if camera.shown != wide && (target_hidden || event.at_ms() - free_from > CLUSTER_GAP_MS) {
-            let start_ms = (free_from + HOLD_MS).min(travel_ms - UNZOOM_MS).max(free_from);
+        if camera.shown != wide && (target_hidden || played_ms(free_from, event.at_ms(), cuts) > CLUSTER_GAP_MS) {
+            let start_ms = past_cuts((free_from + HOLD_MS).min(travel_ms - UNZOOM_MS).max(free_from), cuts);
             travel_ms = travel_ms.max(camera.move_to(start_ms, UNZOOM_MS, wide));
         }
         if let Some(target) = event.cursor_target() {
@@ -244,6 +286,17 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         camera.move_to((free_from + HOLD_MS).min(duration_ms - UNZOOM_MS - LAST_FRAME_MS), UNZOOM_MS, wide);
     }
     (camera.zooms, moves)
+}
+
+/// How long a stretch of the take lasts once the cuts are out of it.
+fn played_ms(from_ms: f64, to_ms: f64, cuts: &[Cut]) -> f64 {
+    let removed: f64 = cuts.iter().map(|c| (c.end_ms.min(to_ms) - c.start_ms.max(from_ms)).max(0.0)).sum();
+    to_ms - from_ms - removed
+}
+
+/// A camera move starting inside a cut would never be seen, so it waits for the end of the cut.
+fn past_cuts(ms: f64, cuts: &[Cut]) -> f64 {
+    cuts.iter().find(|c| ms >= c.start_ms && ms < c.end_ms).map_or(ms, |c| c.end_ms)
 }
 
 /// What a click opened is the thing to look at, so the camera waits for it.
@@ -350,6 +403,82 @@ mod tests {
 
     fn with_speeds(speeds: Vec<SpeedSpan>) -> Result<Timeline> {
         Timeline { speeds, ..Timeline::default() }.validated(10_000.0)
+    }
+
+    #[test]
+    fn counts_only_what_plays_between_two_times() {
+        let cuts = [cut(1_000.0, 2_000.0), cut(5_000.0, 6_000.0)];
+
+        assert_eq!(played_ms(0.0, 10_000.0, &cuts), 8_000.0);
+        assert_eq!(played_ms(1_500.0, 3_000.0, &cuts), 1_000.0);
+        assert_eq!(played_ms(3_000.0, 4_000.0, &cuts), 1_000.0);
+    }
+
+    #[test]
+    fn moves_a_time_inside_a_cut_to_the_end_of_it() {
+        let cuts = [cut(1_000.0, 2_000.0)];
+
+        assert_eq!(past_cuts(999.0, &cuts), 999.0);
+        assert_eq!(past_cuts(1_000.0, &cuts), 2_000.0);
+        assert_eq!(past_cuts(2_000.0, &cuts), 2_000.0);
+    }
+
+    #[test]
+    fn stays_zoomed_in_across_a_wait_that_a_cut_shortens() {
+        let frame = Size { w: 1920.0, h: 1080.0 };
+        let target = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
+        let click = |at_ms| Event::Click { at_ms, target, frame: target, pointer: Pointer::Arrow };
+        let events = [click(2_000.0), click(9_000.0)];
+        let style = Style::default();
+
+        let uncut = Timeline::auto_around_cuts(&events, 14_000.0, frame, &style, &[]);
+        let trimmed = Timeline::auto_around_cuts(&events, 14_000.0, frame, &style, &[cut(3_000.0, 7_500.0)]);
+
+        assert_eq!(uncut.zooms.len(), 2, "{:?}", uncut.zooms);
+        assert_eq!(trimmed.zooms.len(), 1, "{:?}", trimmed.zooms);
+    }
+
+    #[test]
+    fn starts_a_zoom_out_after_a_cut_so_the_viewer_sees_it() {
+        let frame = Size { w: 1920.0, h: 1080.0 };
+        let near = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let click = |at_ms, target| Event::Click { at_ms, target, frame: target, pointer: Pointer::Arrow };
+        let events = [click(2_000.0, near), click(9_000.0, far)];
+
+        let trimmed = Timeline::auto_around_cuts(&events, 14_000.0, frame, &Style::default(), &[cut(3_000.0, 7_500.0)]);
+
+        assert_eq!(trimmed.zooms[0].end_ms, 7_500.0 + UNZOOM_MS);
+    }
+
+    fn cut(start_ms: f64, end_ms: f64) -> Cut {
+        Cut { start_ms, end_ms }
+    }
+
+    fn speeds_after(speeds: Vec<SpeedSpan>, cuts: &[Cut]) -> Vec<SpeedSpan> {
+        Timeline { speeds, ..Timeline::default() }.with_cuts(cuts, 10_000.0).validated(10_000.0).unwrap().speeds
+    }
+
+    #[test]
+    fn adds_a_cut_where_nothing_else_happens() {
+        assert_eq!(speeds_after(vec![], &[cut(1_000.0, 2_000.0)]), [speed(1_000.0, 2_000.0, None)]);
+    }
+
+    #[test]
+    fn trims_or_splits_a_speed_change_a_cut_overlaps_and_drops_one_it_covers() {
+        let long = vec![speed(1_000.0, 5_000.0, Some(3.0))];
+
+        assert_eq!(speeds_after(long.clone(), &[cut(4_000.0, 6_000.0)]), [speed(1_000.0, 4_000.0, Some(3.0)), speed(4_000.0, 6_000.0, None)]);
+        assert_eq!(speeds_after(long.clone(), &[cut(0.0, 2_000.0)]), [speed(0.0, 2_000.0, None), speed(2_000.0, 5_000.0, Some(3.0))]);
+        assert_eq!(speeds_after(long.clone(), &[cut(2_000.0, 3_000.0)]), [speed(1_000.0, 2_000.0, Some(3.0)), speed(2_000.0, 3_000.0, None), speed(3_000.0, 5_000.0, Some(3.0))]);
+        assert_eq!(speeds_after(long, &[cut(0.0, 6_000.0)]), [speed(0.0, 6_000.0, None)]);
+    }
+
+    #[test]
+    fn merges_overlapping_cuts_and_keeps_them_inside_the_take() {
+        assert_eq!(speeds_after(vec![], &[cut(2_000.0, 4_000.0), cut(1_000.0, 3_000.0)]), [speed(1_000.0, 4_000.0, None)]);
+        assert_eq!(speeds_after(vec![], &[cut(9_000.0, 12_000.0)]), [speed(9_000.0, 10_000.0, None)]);
+        assert_eq!(speeds_after(vec![], &[cut(11_000.0, 12_000.0)]), []);
     }
 
     #[test]

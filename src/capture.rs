@@ -14,7 +14,7 @@ use crate::plan::Size;
 use crate::screencast::Screencast;
 use crate::script::{Script, Step};
 use crate::style::Style;
-use crate::timeline::Timeline;
+use crate::timeline::{Cut, Timeline};
 
 /// Runs one agent-browser command and returns its `data`.
 pub trait Browser {
@@ -114,6 +114,9 @@ pub struct Recording {
     /// Came from an existing video, with no event log: the automatic pass reads the pixels instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub imported: bool,
+    /// Mistakes the agent took out while recording. They stay out when the timeline is reset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cuts: Vec<Cut>,
 }
 
 impl Recording {
@@ -130,7 +133,7 @@ impl Recording {
 
     /// The saved edits, or what the automatic pass makes of the take.
     pub fn resolved_timeline(&self) -> Timeline {
-        self.timeline.clone().unwrap_or_else(|| Timeline::auto(&self.events, self.duration_ms, self.frame(), &self.style))
+        self.timeline.clone().unwrap_or_else(|| Timeline::auto_around_cuts(&self.events, self.duration_ms, self.frame(), &self.style, &self.cuts))
     }
 }
 
@@ -163,7 +166,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     let duration_ms = elapsed();
     browser.stop_recording()?;
 
-    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone(), timeline: None, imported: false })
+    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone(), timeline: None, imported: false, cuts: vec![] })
 }
 
 /// Runs one step and returns what it showed on screen, timed by `elapsed`.
@@ -344,7 +347,7 @@ const LOCATE_JS: &str = r#"(target) => {
   return { id, ...box(own), frame: box(frameOf()), cursor: getComputedStyle(el).cursor };
 }"#;
 
-const OVERLAY_JS: &str = r#"() => {
+pub const OVERLAY_JS: &str = r#"() => {
   const layers = [...document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [role=menu], [role=listbox]')]
     .filter((el) => el.getClientRects().length > 0);
   const top = layers[layers.length - 1];
@@ -588,6 +591,7 @@ mod tests {
             style: Style::default(),
             timeline: None,
             imported: false,
+            cuts: vec![],
         };
 
         align_to_video(&mut recording, 10_300.0);

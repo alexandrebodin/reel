@@ -349,7 +349,7 @@ mod tests {
         assert!(made.success());
         let button = Rect { x: 100.0, y: 80.0, w: 40.0, h: 20.0 };
         let click = Event::Click { at_ms: 900.0, target: button, frame: button, pointer: Pointer::Hand };
-        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 2_000.0, events: vec![click], style: Style::default(), timeline: None, imported: false };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 2_000.0, events: vec![click], style: Style::default(), timeline: None, imported: false, cuts: vec![] };
         let path = dir.join("recording.json");
         fs::write(&path, serde_json::to_string(&recording).unwrap()).unwrap();
         path

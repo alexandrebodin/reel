@@ -4,7 +4,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,8 +25,19 @@ pub struct Screencast {
     started_at: f64,
 }
 
+/// A script to run in the page, in this document and every later one, that reports through a binding.
+pub struct PageListener {
+    pub binding: String,
+    pub script: String,
+    pub signals: mpsc::Sender<String>,
+}
+
 impl Screencast {
     pub fn start(cdp_url: &str, page_url: &str, size: [u32; 2], scale: u32, video: &Path, fps: u32) -> Result<Screencast> {
+        Screencast::start_with_listener(cdp_url, page_url, size, scale, video, fps, None)
+    }
+
+    pub fn start_with_listener(cdp_url: &str, page_url: &str, size: [u32; 2], scale: u32, video: &Path, fps: u32, listener: Option<PageListener>) -> Result<Screencast> {
         let frames = video.with_extension("frames");
         let _ = fs::remove_dir_all(&frames);
         fs::create_dir_all(&frames)?;
@@ -37,6 +48,16 @@ impl Screencast {
         let attached = devtools.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None)?;
         let session = attached["sessionId"].as_str().context("attaching to the page")?.to_string();
 
+        let mut signals = None;
+        if let Some(listener) = listener {
+            devtools.call("Runtime.enable", json!({}), Some(&session))?;
+            devtools.call("Page.enable", json!({}), Some(&session))?;
+            devtools.call("Runtime.addBinding", json!({ "name": listener.binding }), Some(&session))?;
+            devtools.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": listener.script }), Some(&session))?;
+            devtools.call("Runtime.evaluate", json!({ "expression": listener.script }), Some(&session))?;
+            signals = Some(listener.signals);
+        }
+
         let started_at = now();
         let params = json!({ "format": "png", "everyNthFrame": 1, "maxWidth": size[0] * scale, "maxHeight": size[1] * scale });
         devtools.call("Page.startScreencast", params, Some(&session))?;
@@ -44,9 +65,14 @@ impl Screencast {
         let stop = Arc::new(AtomicBool::new(false));
         let reader = {
             let (stop, frames) = (stop.clone(), frames.clone());
-            thread::spawn(move || devtools.save_frames(&session, &frames, &stop))
+            thread::spawn(move || devtools.save_frames(&session, &frames, &stop, signals))
         };
         Ok(Screencast { stop, reader, frames, video: video.to_path_buf(), fps, started_at })
+    }
+
+    /// When the first frame of the video was asked for, in seconds of wall clock.
+    pub fn started_at(&self) -> f64 {
+        self.started_at
     }
 
     /// Stops recording and encodes what arrived into the video.
@@ -157,7 +183,7 @@ impl Devtools {
 
     /// Saves frames until told to stop, acknowledging each so Chrome paces itself to the disk and
     /// slows down rather than dropping quality. Returns each frame's capture time.
-    fn save_frames(mut self, session: &str, dir: &Path, stop: &AtomicBool) -> Result<Vec<f64>> {
+    fn save_frames(mut self, session: &str, dir: &Path, stop: &AtomicBool, signals: Option<mpsc::Sender<String>>) -> Result<Vec<f64>> {
         self.socket.get_ref().set_read_timeout(Some(Duration::from_millis(100)))?;
         let mut timestamps = Vec::new();
         let mut stop_id = None;
@@ -174,6 +200,9 @@ impl Devtools {
             let message: Value = serde_json::from_str(&text)?;
             if stop_id.is_some() && message["id"].as_u64() == stop_id {
                 return Ok(timestamps);
+            }
+            if let (Some(signals), "Runtime.bindingCalled") = (&signals, message["method"].as_str().unwrap_or_default()) {
+                let _ = signals.send(message["params"]["payload"].as_str().unwrap_or_default().to_string());
             }
             if message["method"] == "Page.screencastFrame" {
                 let params = &message["params"];

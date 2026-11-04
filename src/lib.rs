@@ -3,6 +3,7 @@ pub mod editor;
 pub mod events;
 pub mod motion;
 pub mod plan;
+pub mod recorder;
 pub mod render;
 pub mod screencast;
 pub mod script;
@@ -13,11 +14,11 @@ pub mod timeline;
 use std::fs;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use editor::Editor;
 use capture::{align_to_video, capture, AgentBrowser, Browser, Pacing, Recording};
@@ -77,8 +78,21 @@ pub fn serve_editor(editor: Editor) -> Result<String> {
     Ok(url)
 }
 
-/// Opens a recording or any video in the editor, in the browser, until the process ends.
-pub fn edit(path: &Path, open_browser: bool) -> Result<()> {
+/// Whether the desktop app is installed, for `edit` to prefer it.
+fn has_desktop_app() -> bool {
+    cfg!(target_os = "macos") && Command::new("open").args(["-Ra", "Reel"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+/// Opens a recording or any video in the desktop app if there is one. Otherwise, or when told to,
+/// serves it to a browser until the process ends.
+pub fn edit(path: &Path, open_browser: bool, prefer_browser: bool) -> Result<()> {
+    if open_browser && !prefer_browser && has_desktop_app() {
+        let path = path.canonicalize().with_context(|| format!("reading {}", path.display()))?;
+        if Command::new("open").args(["-n", "-a", "Reel", "--args"]).arg(&path).status()?.success() {
+            println!("opened {} in Reel", path.display());
+            return Ok(());
+        }
+    }
     let url = serve_editor(open_editor(path)?)?;
     println!("{url}");
     if open_browser {
@@ -105,7 +119,7 @@ mod tests {
     }
 
     fn recording(timeline: Option<timeline::Timeline>) -> Recording {
-        Recording { video: "/nonexistent/raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 1_000.0, events: vec![], style: Default::default(), timeline, imported: false }
+        Recording { video: "/nonexistent/raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 1_000.0, events: vec![], style: Default::default(), timeline, imported: false, cuts: vec![] }
     }
 
     #[test]
