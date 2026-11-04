@@ -12,6 +12,9 @@ pub struct Script {
     pub size: [u32; 2],
     #[serde(default = "default_fps")]
     pub fps: u32,
+    /// Device pixels per CSS pixel in the capture: text stays sharp through padding and zoom.
+    #[serde(default = "default_scale")]
+    pub scale: u32,
     /// agent-browser state file whose live cookies sign the browser in. Only its cookies are used.
     #[serde(default)]
     pub state: Option<PathBuf>,
@@ -39,6 +42,10 @@ fn default_size() -> [u32; 2] {
 
 fn default_fps() -> u32 {
     60
+}
+
+fn default_scale() -> u32 {
+    2
 }
 
 impl Script {
@@ -91,6 +98,7 @@ mod tests {
         assert!(script.url.starts_with("file:///") && script.url.ends_with("/page.html"));
         assert_eq!(script.size, [1920, 1080]);
         assert_eq!(script.fps, 60);
+        assert_eq!(script.scale, 2);
         assert_eq!(
             script.steps,
             vec![

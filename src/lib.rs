@@ -22,7 +22,7 @@ pub fn record(script_path: &Path, output: Option<PathBuf>) -> Result<PathBuf> {
     let dir = base.join("out").join(&name);
     fs::create_dir_all(&dir)?;
     let dir = dir.canonicalize()?;
-    let video = dir.join("raw.webm");
+    let video = dir.join("raw.mp4");
 
     let mut browser = AgentBrowser::new(&format!("reel-{name}"));
     let captured = capture(&script, &mut browser, &video, &Pacing::default());

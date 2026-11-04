@@ -75,9 +75,16 @@ impl Default for Pacing {
 pub struct Recording {
     pub video: PathBuf,
     pub size: [u32; 2],
+    /// Device pixels per CSS pixel in the video. Events stay in CSS pixels.
+    #[serde(default = "one")]
+    pub scale: u32,
     pub fps: u32,
     pub duration_ms: f64,
     pub events: Vec<Event>,
+}
+
+fn one() -> u32 {
+    1
 }
 
 pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing: &Pacing) -> Result<Recording> {
@@ -87,7 +94,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
         sign_in(browser, state, &script.url)?;
     }
     navigate(browser, &["open", &script.url])?;
-    browser.run(&["set", "viewport", &script.size[0].to_string(), &script.size[1].to_string()], None)?;
+    browser.run(&["set", "viewport", &script.size[0].to_string(), &script.size[1].to_string(), &script.scale.to_string()], None)?;
     let mut last_action = Instant::now() - pacing.between_actions;
     for step in &script.setup {
         perform(browser, step, pacing, &mut last_action, &|| 0.0)?;
@@ -107,7 +114,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     let duration_ms = elapsed();
     browser.run(&["record", "stop"], None)?;
 
-    Ok(Recording { video: video.to_path_buf(), size: script.size, fps: script.fps, duration_ms, events })
+    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events })
 }
 
 /// Runs one step and returns what it showed on screen, timed by `elapsed`.
@@ -340,7 +347,7 @@ mod tests {
     }
 
     fn script(steps: Vec<Step>) -> Script {
-        Script { url: "about:blank".into(), size: [1920, 1080], fps: 60, state: None, setup: vec![], steps }
+        Script { url: "about:blank".into(), size: [1920, 1080], fps: 60, scale: 2, state: None, setup: vec![], steps }
     }
 
     fn no_pacing() -> Pacing {
@@ -368,6 +375,24 @@ mod tests {
         let stop = browser.commands.iter().position(|c| c == "record stop").unwrap();
         let click = browser.commands.iter().position(|c| c.starts_with("click")).unwrap();
         assert!(start < click && click < stop);
+    }
+
+    #[test]
+    fn captures_at_the_scripts_device_scale() {
+        let mut browser = FakeBrowser::default();
+
+        let recording = capture(&script(vec![]), &mut browser, Path::new("/tmp/raw.mp4"), &no_pacing()).unwrap();
+
+        assert!(browser.commands.contains(&"set viewport 1920 1080 2".to_string()));
+        assert_eq!(recording.scale, 2);
+    }
+
+    #[test]
+    fn reads_a_recording_from_before_device_scales_as_1x() {
+        let recording: Recording =
+            serde_json::from_str(r#"{ "video": "raw.webm", "size": [1920, 1080], "fps": 60, "duration_ms": 1.0, "events": [] }"#).unwrap();
+
+        assert_eq!(recording.scale, 1);
     }
 
     #[test]
@@ -485,6 +510,7 @@ mod tests {
         let mut recording = Recording {
             video: PathBuf::from("raw.webm"),
             size: [1920, 1080],
+            scale: 1,
             fps: 60,
             duration_ms: 10_000.0,
             events: vec![Event::Click { at_ms: 2_000.0, target, frame: target }],
