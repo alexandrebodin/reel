@@ -1,6 +1,5 @@
 use crate::events::{Event, Rect};
-
-pub const MAX_ZOOM: f64 = 1.4;
+use crate::style::Style;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -83,9 +82,9 @@ struct Move {
 }
 
 impl Plan {
-    pub fn new(events: &[Event], duration_ms: f64, frame: Size) -> Plan {
+    pub fn new(events: &[Event], duration_ms: f64, frame: Size, style: &Style) -> Plan {
         let cursor_start = (frame.w * 0.62, frame.h * 0.72);
-        let (camera, moves) = choreograph(events, duration_ms, cursor_start, frame);
+        let (camera, moves) = choreograph(events, duration_ms, cursor_start, frame, style);
         Plan {
             frame,
             time: TimeMap::new(events, duration_ms),
@@ -149,8 +148,8 @@ fn overview(frame: Size) -> View {
     View { x: 0.0, y: 0.0, w: frame.w, h: frame.h }
 }
 
-fn focus_view(target: Rect, frame: Size) -> View {
-    let zoom = (frame.w / (target.w * FIT_MARGIN)).min(frame.h / (target.h * FIT_MARGIN)).clamp(1.0, MAX_ZOOM);
+fn focus_view(target: Rect, frame: Size, max_zoom: f64) -> View {
+    let zoom = (frame.w / (target.w * FIT_MARGIN)).min(frame.h / (target.h * FIT_MARGIN)).clamp(1.0, max_zoom);
     let (w, h) = (frame.w / zoom, frame.h / zoom);
     let (cx, cy) = target.center();
     View { x: (cx - w / 2.0).clamp(0.0, frame.w - w), y: (cy - h / 2.0).clamp(0.0, frame.h - h), w, h }
@@ -182,7 +181,7 @@ impl Camera {
 /// Decides the camera and the cursor together, because one rule ties them: the cursor only travels
 /// through what the viewer can see, so a target out of view means zooming out first. The camera
 /// comes back in once the click has landed, and stays still for anything already in view.
-fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), frame: Size) -> (Vec<(f64, View)>, Vec<Move>) {
+fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), frame: Size, style: &Style) -> (Vec<(f64, View)>, Vec<Move>) {
     let pauses = pauses(events);
     let mut actions: Vec<&Event> = events.iter().filter(|e| e.camera_frame().is_some()).collect();
     actions.sort_by(|a, b| a.at_ms().total_cmp(&b.at_ms()));
@@ -210,7 +209,7 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         free_from = attention_end(event, next, &pauses);
 
         if let Some(rect) = event.camera_frame() {
-            let view = focus_view(rect, frame);
+            let view = focus_view(rect, frame, style.zoom.level);
             let wanted = camera.shown == wide || !in_view(camera.shown, rect);
             if wanted && !focus_follows(event, next) && stays_long_enough(event.at_ms(), view, next, free_from) {
                 camera.move_to(event.at_ms(), ZOOM_IN_MS, view);
@@ -406,9 +405,15 @@ fn idle_zone(start_ms: f64, end_ms: f64) -> Option<Segment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::Zoom;
 
     const FRAME: Size = Size { w: 1920.0, h: 1080.0 };
     const BUTTON: Rect = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
+    const ZOOM: f64 = 1.4;
+
+    fn plan(events: &[Event], duration_ms: f64) -> Plan {
+        Plan::new(events, duration_ms, FRAME, &Style::default())
+    }
 
     fn click(at_ms: f64, target: Rect) -> Event {
         Event::Click { at_ms, target, frame: target }
@@ -420,20 +425,38 @@ mod tests {
 
     #[test]
     fn zooms_onto_a_clicked_button_once_the_click_lands() {
-        let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON)], 6_000.0);
 
         assert_eq!(plan.camera_at(1_900.0).zoom(FRAME), 1.0, "zoomed in before the click");
         let view = plan.camera_at(3_000.0);
-        assert!(close(view.zoom(FRAME), MAX_ZOOM), "zoom was {}", view.zoom(FRAME));
+        assert!(close(view.zoom(FRAME), ZOOM), "zoom was {}", view.zoom(FRAME));
         let (cx, cy) = view.center();
         assert!(close(cx, 950.0) && close(cy, 516.0), "centered on ({cx}, {cy})");
+    }
+
+    #[test]
+    fn zooms_as_far_as_the_style_asks() {
+        let style = Style { zoom: Zoom { level: 1.2 } };
+        let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &style);
+
+        assert!(close(plan.camera_at(3_000.0).zoom(FRAME), 1.2), "zoom was {}", plan.camera_at(3_000.0).zoom(FRAME));
+    }
+
+    #[test]
+    fn never_moves_the_camera_at_a_zoom_level_of_one() {
+        let style = Style { zoom: Zoom { level: 1.0 } };
+        let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &style);
+
+        for t in [0.0, 2_500.0, 3_000.0, 5_000.0] {
+            assert_eq!(plan.camera_at(t), overview(FRAME), "the camera moved at {t}");
+        }
     }
 
     #[test]
     fn keeps_the_row_of_a_clicked_control_in_view() {
         let menu_button = Rect { x: 1425.0, y: 485.0, w: 32.0, h: 32.0 };
         let row = Rect { x: 704.0, y: 472.0, w: 768.0, h: 58.0 };
-        let plan = Plan::new(&[Event::Click { at_ms: 2_000.0, target: menu_button, frame: row }], 6_000.0, FRAME);
+        let plan = plan(&[Event::Click { at_ms: 2_000.0, target: menu_button, frame: row }], 6_000.0);
 
         let view = plan.camera_at(3_000.0);
 
@@ -448,7 +471,7 @@ mod tests {
     fn fits_a_dialog_that_opens_after_a_click_without_moving_the_cursor() {
         let dialog = Rect { x: 1_250.0, y: 120.0, w: 520.0, h: 480.0 };
         let events = [click(2_000.0, BUTTON), Event::Focus { at_ms: 2_350.0, frame: dialog }];
-        let plan = Plan::new(&events, 8_000.0, FRAME);
+        let plan = plan(&events, 8_000.0);
 
         let view = plan.camera_at(3_200.0);
 
@@ -463,10 +486,10 @@ mod tests {
     fn holds_the_view_through_a_scripted_pause() {
         let near = Rect { x: 600.0, y: 400.0, w: 100.0, h: 32.0 };
         let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 7_100.0 }, click(8_000.0, near)];
-        let plan = Plan::new(&events, 14_000.0, FRAME);
+        let plan = plan(&events, 14_000.0);
 
         for t in [3_000.0, 5_000.0, 7_000.0] {
-            assert!(close(plan.camera_at(t).zoom(FRAME), MAX_ZOOM), "zoomed out at {t}");
+            assert!(close(plan.camera_at(t).zoom(FRAME), ZOOM), "zoomed out at {t}");
             assert!(close(plan.camera_at(t).center().0, 950.0), "panned away at {t}");
         }
     }
@@ -474,16 +497,16 @@ mod tests {
     #[test]
     fn holds_the_view_through_a_pause_after_the_last_action() {
         let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 7_100.0 }];
-        let plan = Plan::new(&events, 12_000.0, FRAME);
+        let plan = plan(&events, 12_000.0);
 
-        assert!(close(plan.camera_at(6_500.0).zoom(FRAME), MAX_ZOOM), "zoomed out during the pause");
+        assert!(close(plan.camera_at(6_500.0).zoom(FRAME), ZOOM), "zoomed out during the pause");
         assert_eq!(plan.camera_at(11_000.0).zoom(FRAME), 1.0);
     }
 
     #[test]
     fn keeps_the_view_inside_the_frame_for_a_target_in_a_corner() {
         let corner = Rect { x: 1880.0, y: 4.0, w: 32.0, h: 32.0 };
-        let plan = Plan::new(&[click(2_000.0, corner)], 6_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, corner)], 6_000.0);
 
         let view = plan.camera_at(3_000.0);
 
@@ -494,7 +517,7 @@ mod tests {
 
     #[test]
     fn shows_the_whole_frame_before_and_well_after_the_action() {
-        let plan = Plan::new(&[click(2_000.0, BUTTON)], 10_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON)], 10_000.0);
 
         assert_eq!(plan.camera_at(0.0).zoom(FRAME), 1.0);
         assert_eq!(plan.camera_at(9_000.0).zoom(FRAME), 1.0);
@@ -502,7 +525,7 @@ mod tests {
 
     #[test]
     fn ends_on_the_whole_frame_even_right_after_the_last_action() {
-        let plan = Plan::new(&[click(2_000.0, BUTTON)], 3_600.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON)], 3_600.0);
 
         assert_eq!(plan.camera_at(3_600.0).zoom(FRAME), 1.0);
     }
@@ -510,7 +533,7 @@ mod tests {
     #[test]
     fn keeps_the_camera_still_while_the_cursor_moves_inside_the_view() {
         let near = Rect { x: 600.0, y: 400.0, w: 100.0, h: 32.0 };
-        let plan = Plan::new(&[click(2_000.0, BUTTON), click(3_500.0, near)], 8_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON), click(3_500.0, near)], 8_000.0);
 
         let settled = plan.camera_at(2_800.0);
         for t in [3_000.0, 3_300.0, 3_500.0, 4_000.0] {
@@ -523,21 +546,21 @@ mod tests {
     fn zooms_out_before_the_cursor_travels_to_a_target_out_of_view() {
         let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
         let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 4_000.0 }, click(5_000.0, far)];
-        let plan = Plan::new(&events, 10_000.0, FRAME);
+        let plan = plan(&events, 10_000.0);
 
-        assert!(close(plan.camera_at(3_900.0).zoom(FRAME), MAX_ZOOM), "zoomed out during the pause");
+        assert!(close(plan.camera_at(3_900.0).zoom(FRAME), ZOOM), "zoomed out during the pause");
         let wide_from = (0..=500).map(|i| 4_000.0 + i as f64 * 10.0).find(|t| plan.camera_at(*t).zoom(FRAME) == 1.0);
         let wide_from = wide_from.expect("never zoomed out before the click");
         assert!(close(plan.cursor_at(wide_from - 10.0).x, 950.0), "the cursor left while still zoomed in");
         assert!(plan.cursor_at(wide_from + 200.0).x < 950.0, "the cursor did not travel once zoomed out");
         assert_eq!(plan.camera_at(5_000.0).zoom(FRAME), 1.0, "zoomed in before the click");
-        assert!(close(plan.camera_at(6_000.0).zoom(FRAME), MAX_ZOOM), "did not zoom onto the new target");
+        assert!(close(plan.camera_at(6_000.0).zoom(FRAME), ZOOM), "did not zoom onto the new target");
     }
 
     #[test]
     fn zooms_out_after_a_long_gap_before_a_target_in_view() {
         let near = Rect { x: 600.0, y: 400.0, w: 100.0, h: 32.0 };
-        let plan = Plan::new(&[click(2_000.0, BUTTON), click(9_000.0, near)], 14_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON), click(9_000.0, near)], 14_000.0);
 
         assert_eq!(plan.camera_at(6_000.0).zoom(FRAME), 1.0);
     }
@@ -545,7 +568,7 @@ mod tests {
     #[test]
     fn does_not_zoom_in_for_a_moment_when_the_next_target_is_out_of_view() {
         let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
-        let plan = Plan::new(&[click(2_000.0, BUTTON), click(3_300.0, far)], 8_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON), click(3_300.0, far)], 8_000.0);
 
         for t in [2_000.0, 2_400.0, 2_800.0, 3_300.0] {
             assert_eq!(plan.camera_at(t).zoom(FRAME), 1.0, "zoomed in at {t}");
@@ -554,7 +577,7 @@ mod tests {
 
     #[test]
     fn moves_the_cursor_onto_the_target_before_clicking() {
-        let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON)], 6_000.0);
 
         let at_click = plan.cursor_at(2_000.0);
         assert!(close(at_click.x, 950.0) && close(at_click.y, 516.0));
@@ -575,7 +598,7 @@ mod tests {
         ];
 
         for events in timelines {
-            let plan = Plan::new(&events, 9_000.0, FRAME);
+            let plan = plan(&events, 9_000.0);
             for event in &events {
                 if let Event::Click { at_ms, target, .. } = event {
                     let (x, y) = target.center();
@@ -588,7 +611,7 @@ mod tests {
 
     #[test]
     fn presses_the_cursor_and_ripples_on_a_click() {
-        let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME);
+        let plan = plan(&[click(2_000.0, BUTTON)], 6_000.0);
 
         assert_eq!(plan.cursor_at(2_050.0).pressed, 1.0);
         assert_eq!(plan.cursor_at(3_000.0).pressed, 0.0);
@@ -601,7 +624,7 @@ mod tests {
     #[test]
     fn plays_a_busy_timeline_at_real_speed() {
         let events: Vec<Event> = (0..6).map(|i| click(500.0 + i as f64 * 1_000.0, BUTTON)).collect();
-        let plan = Plan::new(&events, 6_000.0, FRAME);
+        let plan = plan(&events, 6_000.0);
 
         assert!(close(plan.time.output_duration_ms(), 6_000.0));
         assert!(close(plan.time.source_ms(3_000.0), 3_000.0));
@@ -609,7 +632,7 @@ mod tests {
 
     #[test]
     fn fast_forwards_an_idle_stretch() {
-        let plan = Plan::new(&[click(1_000.0, BUTTON), click(9_000.0, BUTTON)], 12_000.0, FRAME);
+        let plan = plan(&[click(1_000.0, BUTTON), click(9_000.0, BUTTON)], 12_000.0);
 
         let output = plan.time.output_duration_ms();
         assert!(output < 10_000.0, "output was {output}");
@@ -621,7 +644,7 @@ mod tests {
 
     #[test]
     fn cuts_an_idle_stretch_too_long_to_fast_forward() {
-        let plan = Plan::new(&[click(1_000.0, BUTTON), click(120_000.0, BUTTON)], 124_000.0, FRAME);
+        let plan = plan(&[click(1_000.0, BUTTON), click(120_000.0, BUTTON)], 124_000.0);
 
         assert!(plan.time.output_duration_ms() < 15_000.0, "output was {}", plan.time.output_duration_ms());
     }
@@ -629,7 +652,7 @@ mod tests {
     #[test]
     fn keeps_a_scripted_pause_at_real_speed() {
         let events = [click(1_000.0, BUTTON), Event::Pause { at_ms: 1_000.0, until_ms: 9_000.0 }];
-        let plan = Plan::new(&events, 9_000.0, FRAME);
+        let plan = plan(&events, 9_000.0);
 
         assert!(close(plan.time.output_duration_ms(), 9_000.0));
     }
@@ -638,7 +661,7 @@ mod tests {
     fn keeps_short_typing_at_real_speed() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
         let events = [Event::Type { at_ms: 1_000.0, until_ms: 1_900.0, target: field, frame: field }];
-        let plan = Plan::new(&events, 4_000.0, FRAME);
+        let plan = plan(&events, 4_000.0);
 
         assert!(close(plan.time.output_duration_ms(), 4_000.0), "output was {}", plan.time.output_duration_ms());
     }
@@ -647,7 +670,7 @@ mod tests {
     fn plays_typing_faster() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
         let events = [Event::Type { at_ms: 1_000.0, until_ms: 6_000.0, target: field, frame: field }];
-        let plan = Plan::new(&events, 9_000.0, FRAME);
+        let plan = plan(&events, 9_000.0);
 
         assert!(plan.time.output_duration_ms() < 8_000.0, "output was {}", plan.time.output_duration_ms());
     }

@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::events::{Event, Rect};
 use crate::script::{Script, Step};
+use crate::style::Style;
 
 /// Runs one agent-browser command and returns its `data`.
 pub trait Browser {
@@ -81,6 +82,9 @@ pub struct Recording {
     pub fps: u32,
     pub duration_ms: f64,
     pub events: Vec<Event>,
+    /// The look to render with: `--render` reproduces the take without its script.
+    #[serde(default)]
+    pub style: Style,
 }
 
 fn one() -> u32 {
@@ -114,7 +118,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     let duration_ms = elapsed();
     browser.run(&["record", "stop"], None)?;
 
-    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events })
+    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone() })
 }
 
 /// Runs one step and returns what it showed on screen, timed by `elapsed`.
@@ -347,7 +351,7 @@ mod tests {
     }
 
     fn script(steps: Vec<Step>) -> Script {
-        Script { url: "about:blank".into(), size: [1920, 1080], fps: 60, scale: 2, state: None, setup: vec![], steps }
+        Script { url: "about:blank".into(), size: [1920, 1080], fps: 60, scale: 2, style: Style::default(), state: None, setup: vec![], steps }
     }
 
     fn no_pacing() -> Pacing {
@@ -385,6 +389,16 @@ mod tests {
 
         assert!(browser.commands.contains(&"set viewport 1920 1080 2".to_string()));
         assert_eq!(recording.scale, 2);
+    }
+
+    #[test]
+    fn keeps_the_scripts_style_with_the_take() {
+        let mut demo = script(vec![]);
+        demo.style.zoom.level = 1.1;
+
+        let recording = capture(&demo, &mut FakeBrowser::default(), Path::new("/tmp/raw.mp4"), &no_pacing()).unwrap();
+
+        assert_eq!(recording.style.zoom.level, 1.1);
     }
 
     #[test]
@@ -514,6 +528,7 @@ mod tests {
             fps: 60,
             duration_ms: 10_000.0,
             events: vec![Event::Click { at_ms: 2_000.0, target, frame: target }],
+            style: Style::default(),
         };
 
         align_to_video(&mut recording, 10_300.0);

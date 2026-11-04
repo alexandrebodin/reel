@@ -3,6 +3,7 @@ pub mod events;
 pub mod plan;
 pub mod render;
 pub mod script;
+pub mod style;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,13 +11,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use capture::{align_to_video, capture, AgentBrowser, Browser, Pacing, Recording};
-use render::{plan_for, render, video_duration_ms, Style};
+use render::{plan_for, render, video_duration_ms};
 use script::Script;
 
 /// Records the demo a script describes and renders it. Keeps the raw take and its event log
 /// next to the script, in `out/<name>/`, so `render_file` can re-render without recording again.
-pub fn record(script_path: &Path, output: Option<PathBuf>) -> Result<PathBuf> {
-    let script = Script::load(script_path)?;
+pub fn record(script_path: &Path, output: Option<PathBuf>, style_overrides: &[String]) -> Result<PathBuf> {
+    let mut script = Script::load(script_path)?;
+    script.style = script.style.overridden(style_overrides)?;
     let name = script_path.file_stem().and_then(|s| s.to_str()).unwrap_or("demo").to_string();
     let base = script_path.parent().unwrap_or(Path::new("."));
     let dir = base.join("out").join(&name);
@@ -33,14 +35,15 @@ pub fn record(script_path: &Path, output: Option<PathBuf>) -> Result<PathBuf> {
     fs::write(&recording_path, serde_json::to_string_pretty(&recording)?)?;
 
     let output = output.unwrap_or_else(|| dir.join(format!("{name}.mp4")));
-    render(&recording, &plan_for(&recording), &output, &Style::default())?;
+    render(&recording, &plan_for(&recording), &output)?;
     Ok(output)
 }
 
-pub fn render_file(recording_path: &Path, output: Option<PathBuf>) -> Result<PathBuf> {
+pub fn render_file(recording_path: &Path, output: Option<PathBuf>, style_overrides: &[String]) -> Result<PathBuf> {
     let text = fs::read_to_string(recording_path).with_context(|| format!("reading {}", recording_path.display()))?;
-    let recording: Recording = serde_json::from_str(&text)?;
+    let mut recording: Recording = serde_json::from_str(&text)?;
+    recording.style = recording.style.overridden(style_overrides)?;
     let output = output.unwrap_or_else(|| recording_path.with_file_name("render.mp4"));
-    render(&recording, &plan_for(&recording), &output, &Style::default())?;
+    render(&recording, &plan_for(&recording), &output)?;
     Ok(output)
 }

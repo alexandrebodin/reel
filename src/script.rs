@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::style::Style;
+
 /// A demo to record, read from a JSON file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +17,8 @@ pub struct Script {
     /// Device pixels per CSS pixel in the capture: text stays sharp through padding and zoom.
     #[serde(default = "default_scale")]
     pub scale: u32,
+    #[serde(default)]
+    pub style: Style,
     /// agent-browser state file whose live cookies sign the browser in. Only its cookies are used.
     #[serde(default)]
     pub state: Option<PathBuf>,
@@ -60,6 +64,7 @@ impl Script {
             }
         }
         script.state = script.state.map(|state| base.join(state));
+        script.style = script.style.validated().with_context(|| format!("reading the style of {}", path.display()))?;
         Ok(script)
     }
 }
@@ -107,6 +112,13 @@ mod tests {
                 Step::Pause { ms: 500 },
             ]
         );
+    }
+
+    #[test]
+    fn reads_the_style_block() {
+        let script: Script = serde_json::from_str(r#"{ "url": "about:blank", "style": { "zoom": { "level": 1.2 } }, "steps": [] }"#).unwrap();
+
+        assert_eq!(script.style.zoom.level, 1.2);
     }
 
     #[test]

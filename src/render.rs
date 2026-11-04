@@ -16,7 +16,7 @@ use crate::plan::{Cursor, Plan, Ripple, Size, View};
 pub type Rgb = [u8; 3];
 
 #[derive(Clone, Debug)]
-pub struct Style {
+pub struct Look {
     /// Diagonal gradient behind the video, top left to bottom right.
     pub background: [Rgb; 2],
     /// Share of each side left for the background.
@@ -26,14 +26,14 @@ pub struct Style {
     pub cursor_size: f32,
 }
 
-impl Default for Style {
-    fn default() -> Style {
-        Style { background: [[45, 27, 105], [226, 88, 31]], padding: 0.05, radius: 18.0, accent: [255, 106, 61], cursor_size: 26.0 }
+impl Default for Look {
+    fn default() -> Look {
+        Look { background: [[45, 27, 105], [226, 88, 31]], padding: 0.05, radius: 18.0, accent: [255, 106, 61], cursor_size: 26.0 }
     }
 }
 
 pub struct Compositor {
-    style: Style,
+    style: Look,
     /// Frame pixels per CSS pixel: the plan and the style are in CSS pixels.
     density: f32,
     inner: Rect,
@@ -43,7 +43,7 @@ pub struct Compositor {
 }
 
 impl Compositor {
-    pub fn new(width: u32, height: u32, density: u32, style: &Style) -> Compositor {
+    pub fn new(width: u32, height: u32, density: u32, style: &Look) -> Compositor {
         let density = density as f32;
         let (w, h) = (width as f32, height as f32);
         let inner = Rect::from_xywh(w * style.padding, h * style.padding, w * (1.0 - 2.0 * style.padding), h * (1.0 - 2.0 * style.padding))
@@ -166,7 +166,7 @@ pub fn video_duration_ms(video: &Path) -> Result<f64> {
 
 /// Decodes the raw take frame by frame, composites each output frame at the capture's density and
 /// streams it to an H.264 encoder, which downsamples to the demo's size.
-pub fn render(recording: &Recording, plan: &Plan, output: &Path, style: &Style) -> Result<()> {
+pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     let [css_width, css_height] = recording.size;
     let (width, height) = (css_width * recording.scale, css_height * recording.scale);
     let fps = recording.fps as f64;
@@ -188,7 +188,7 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path, style: &Style) 
     let mut frames = decoder.stdout.take().expect("piped stdout");
     let mut sink = encoder.stdin.take().expect("piped stdin");
 
-    let compositor = Compositor::new(width, height, recording.scale, style);
+    let compositor = Compositor::new(width, height, recording.scale, &Look::default());
     let workers = thread::available_parallelism().map_or(1, |n| n.get());
     let mut buffer = vec![0u8; (width * height * 4) as usize];
     let mut current: Option<Arc<Pixmap>> = None;
@@ -240,19 +240,20 @@ fn compose_all(compositor: &Compositor, plan: &Plan, batch: &[(Arc<Pixmap>, f64)
 
 pub fn plan_for(recording: &Recording) -> Plan {
     let size = Size { w: recording.size[0] as f64, h: recording.size[1] as f64 };
-    Plan::new(&recording.events, recording.duration_ms, size)
+    Plan::new(&recording.events, recording.duration_ms, size, &recording.style)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::Style;
     use tiny_skia::Color;
 
     const RED: Rgb = [220, 30, 30];
     const BLUE: Rgb = [30, 30, 220];
 
-    fn flat(background: Rgb) -> Style {
-        Style { background: [background, background], padding: 0.0, radius: 0.0, accent: [255, 106, 61], cursor_size: 26.0 }
+    fn flat(background: Rgb) -> Look {
+        Look { background: [background, background], padding: 0.0, radius: 0.0, accent: [255, 106, 61], cursor_size: 26.0 }
     }
 
     fn halves() -> Pixmap {
@@ -296,7 +297,7 @@ mod tests {
 
     #[test]
     fn frames_the_video_on_the_background() {
-        let style = Style { padding: 0.1, ..flat([0, 200, 0]) };
+        let style = Look { padding: 0.1, ..flat([0, 200, 0]) };
 
         let out = Compositor::new(400, 200, 1, &style).compose(&halves(), FULL, None, &[]);
 
@@ -348,10 +349,10 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![] };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style: Style::default() };
         let output = dir.join("out.mp4");
 
-        render(&recording, &plan_for(&recording), &output, &Style::default()).unwrap();
+        render(&recording, &plan_for(&recording), &output).unwrap();
 
         let probe = Command::new("ffprobe")
             .args(["-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
