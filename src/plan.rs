@@ -60,6 +60,8 @@ const IDLE_TARGET_MS: f64 = 600.0;
 const MIN_IDLE_SPEED: f64 = 3.0;
 const MAX_IDLE_SPEED: f64 = 12.0;
 const TYPING_SPEED: f64 = 2.0;
+const MIN_FAST_TYPING_MS: f64 = 1_500.0;
+const MAX_PULL_BACK: f64 = 0.35;
 
 pub struct Plan {
     pub frame: Size,
@@ -109,7 +111,8 @@ impl Plan {
                 if t1 <= t0 {
                     return to;
                 }
-                return lerp_view(from, to, ease_in_out((t_ms - t0) / (t1 - t0)));
+                let p = (t_ms - t0) / (t1 - t0);
+                return pull_back(lerp_view(from, to, ease_in_out(p)), from, to, p, self.frame);
             }
         }
         self.camera[self.camera.len() - 1].1
@@ -231,6 +234,19 @@ fn lerp_view(a: View, b: View, p: f64) -> View {
     View { x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h) }
 }
 
+/// A long pan widens the view on the way, so the viewer keeps their bearings.
+fn pull_back(view: View, from: View, to: View, p: f64, frame: Size) -> View {
+    let ((ax, ay), (bx, by)) = (from.center(), to.center());
+    let travel = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt() / from.w.max(to.w);
+    let depth = ((travel - 0.5) * 0.6).clamp(0.0, MAX_PULL_BACK) * (std::f64::consts::PI * p).sin();
+    if depth <= 0.0 {
+        return view;
+    }
+    let (w, h) = ((view.w / (1.0 - depth)).min(frame.w), (view.h / (1.0 - depth)).min(frame.h));
+    let (cx, cy) = view.center();
+    View { x: (cx - w / 2.0).clamp(0.0, frame.w - w), y: (cy - h / 2.0).clamp(0.0, frame.h - h), w, h }
+}
+
 /// A hand moves in a slight arc, not a straight line.
 fn curve(from: (f64, f64), to: (f64, f64), p: f64) -> (f64, f64) {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -291,7 +307,7 @@ impl TimeMap {
         for event in events {
             if let Event::Type { at_ms, until_ms, .. } = event {
                 let (start_ms, end_ms) = (at_ms + 250.0, until_ms - 150.0);
-                if end_ms - start_ms > 300.0 {
+                if end_ms - start_ms > MIN_FAST_TYPING_MS {
                     zones.push(Segment { start_ms, end_ms, speed: TYPING_SPEED });
                 }
             }
@@ -457,6 +473,30 @@ mod tests {
         let plan = Plan::new(&events, 9_000.0, FRAME);
 
         assert!(close(plan.time.output_duration_ms(), 9_000.0));
+    }
+
+    #[test]
+    fn pulls_back_mid_way_through_a_pan_across_the_screen() {
+        let top_right = Rect { x: 1780.0, y: 10.0, w: 120.0, h: 36.0 };
+        let bottom_left = Rect { x: 80.0, y: 1000.0, w: 120.0, h: 36.0 };
+        let plan = Plan::new(&[click(2_000.0, top_right), click(3_200.0, bottom_left)], 8_000.0, FRAME);
+
+        let start = plan.camera_at(2_550.0).zoom(FRAME);
+        let middle = plan.camera_at(2_800.0).zoom(FRAME);
+        let end = plan.camera_at(3_050.0).zoom(FRAME);
+
+        assert!(middle < start - 0.2 && middle < end - 0.2, "zoom went {start} -> {middle} -> {end}");
+        let view = plan.camera_at(2_800.0);
+        assert!(view.x >= 0.0 && view.y >= 0.0 && view.x + view.w <= FRAME.w + 0.01 && view.y + view.h <= FRAME.h + 0.01);
+    }
+
+    #[test]
+    fn keeps_short_typing_at_real_speed() {
+        let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 1_900.0, target: field }];
+        let plan = Plan::new(&events, 4_000.0, FRAME);
+
+        assert!(close(plan.time.output_duration_ms(), 4_000.0), "output was {}", plan.time.output_duration_ms());
     }
 
     #[test]
