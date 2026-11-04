@@ -86,6 +86,7 @@ pub const UNZOOM_MS: f64 = 600.0;
 pub const CURSOR_ARRIVES_EARLY_MS: f64 = 120.0;
 pub const MIN_SPEED: f64 = 0.25;
 pub const MAX_SPEED: f64 = 16.0;
+const HOVER_CHANGE_MS: f64 = 200.0;
 const MIN_CALM_ZOOM_MS: f64 = 1_500.0;
 const MIN_WIDE_MS: f64 = 3_000.0;
 const SAME_AREA_SHARE: f64 = 0.7;
@@ -295,7 +296,24 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         camera.move_to((free_from + HOLD_MS).min(duration_ms - UNZOOM_MS - LAST_FRAME_MS), UNZOOM_MS, wide);
     }
     let zooms = if style.zoom.calm { calmed(camera.zooms, frame, cuts) } else { camera.zooms };
-    (zooms, moves)
+    (zooms, with_hovers(moves, events, cursor_start))
+}
+
+/// Adds a move on the spot wherever the cursor should change without going anywhere.
+fn with_hovers(mut moves: Vec<Move>, events: &[Event], cursor_start: (f64, f64)) -> Vec<Move> {
+    for event in events {
+        let Event::Hover { at_ms, pointer } = event else { continue };
+        let (start_ms, end_ms) = (at_ms - HOVER_CHANGE_MS, *at_ms);
+        let settled = moves.iter().rfind(|m| m.end_ms <= start_ms);
+        let travelling = moves.iter().any(|m| m.start_ms < end_ms && m.end_ms > start_ms);
+        if travelling || settled.is_none_or(|m| m.pointer == *pointer) {
+            continue;
+        }
+        let (x, y) = settled.map_or(cursor_start, |m| (m.x, m.y));
+        moves.push(Move { start_ms, end_ms, x, y, pointer: *pointer });
+        moves.sort_by(|a, b| a.end_ms.total_cmp(&b.end_ms));
+    }
+    moves
 }
 
 /// In a calm take a plain click is not worth a camera move: only typing, something that opened,
@@ -379,6 +397,7 @@ fn attention_end(event: &Event, next: Option<&Event>, pauses: &[(f64, f64)], cut
 fn auto_speeds(events: &[Event], duration_ms: f64) -> Vec<SpeedSpan> {
     let mut busy: Vec<(f64, f64)> = events
         .iter()
+        .filter(|e| !matches!(e, Event::Hover { .. }))
         .map(|e| match e {
             Event::Pause { at_ms, until_ms } => (*at_ms, until_ms + HOLD_MS + UNZOOM_MS),
             _ => (

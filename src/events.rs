@@ -57,6 +57,9 @@ pub enum Event {
     },
     /// Something appeared that the viewer should look at: a dialog, a menu, a result.
     Focus { at_ms: f64, frame: Rect },
+    /// What the cursor looks like over what is under it now, checked a moment after a click because
+    /// the clicked element may have gone.
+    Hover { at_ms: f64, pointer: Pointer },
     /// A pause the script asked for so viewers can read: never sped up.
     Pause { at_ms: f64, until_ms: f64 },
 }
@@ -64,13 +67,13 @@ pub enum Event {
 impl Event {
     pub fn at_ms(&self) -> f64 {
         match self {
-            Event::Click { at_ms, .. } | Event::Type { at_ms, .. } | Event::Focus { at_ms, .. } | Event::Pause { at_ms, .. } => *at_ms,
+            Event::Click { at_ms, .. } | Event::Type { at_ms, .. } | Event::Focus { at_ms, .. } | Event::Hover { at_ms, .. } | Event::Pause { at_ms, .. } => *at_ms,
         }
     }
 
     pub fn until_ms(&self) -> f64 {
         match self {
-            Event::Click { at_ms, .. } | Event::Focus { at_ms, .. } => *at_ms,
+            Event::Click { at_ms, .. } | Event::Focus { at_ms, .. } | Event::Hover { at_ms, .. } => *at_ms,
             Event::Type { until_ms, .. } | Event::Pause { until_ms, .. } => *until_ms,
         }
     }
@@ -78,13 +81,14 @@ impl Event {
     pub fn cursor_target(&self) -> Option<Rect> {
         match self {
             Event::Click { target, .. } | Event::Type { target, .. } => Some(*target),
-            Event::Focus { .. } | Event::Pause { .. } => None,
+            Event::Focus { .. } | Event::Hover { .. } | Event::Pause { .. } => None,
         }
     }
 
     pub fn pointer(&self) -> Pointer {
         match self {
             Event::Click { pointer, .. } | Event::Type { pointer, .. } => *pointer,
+            Event::Hover { pointer, .. } => *pointer,
             Event::Focus { .. } | Event::Pause { .. } => Pointer::Arrow,
         }
     }
@@ -92,7 +96,7 @@ impl Event {
     pub fn camera_frame(&self) -> Option<Rect> {
         match self {
             Event::Click { frame, .. } | Event::Type { frame, .. } | Event::Focus { frame, .. } => Some(*frame),
-            Event::Pause { .. } => None,
+            Event::Hover { .. } | Event::Pause { .. } => None,
         }
     }
 
@@ -101,6 +105,7 @@ impl Event {
             Event::Click { at_ms, target, frame, pointer } => Event::Click { at_ms: at_ms + by_ms, target, frame, pointer },
             Event::Type { at_ms, until_ms, target, frame, pointer } => Event::Type { at_ms: at_ms + by_ms, until_ms: until_ms + by_ms, target, frame, pointer },
             Event::Focus { at_ms, frame } => Event::Focus { at_ms: at_ms + by_ms, frame },
+            Event::Hover { at_ms, pointer } => Event::Hover { at_ms: at_ms + by_ms, pointer },
             Event::Pause { at_ms, until_ms } => Event::Pause { at_ms: at_ms + by_ms, until_ms: until_ms + by_ms },
         }
     }

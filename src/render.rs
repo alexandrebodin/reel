@@ -428,6 +428,7 @@ pub fn render_with_progress(recording: &Recording, plan: &Plan, output: &Path, p
     let total = (plan.time.output_duration_ms() / 1_000.0 * fps).ceil() as i64;
     let frame_ms = 1_000.0 / fps;
     let mut batch: Vec<(Arc<Pixmap>, Vec<f64>)> = Vec::with_capacity(workers);
+    let (mut last_frame, mut fading_from): (Option<Pixmap>, Option<Pixmap>) = (None, None);
     for index in 0..total {
         let output_ms = index as f64 * frame_ms;
         let source_ms = plan.time.source_ms(output_ms);
@@ -445,8 +446,22 @@ pub fn render_with_progress(recording: &Recording, plan: &Plan, output: &Path, p
         let Some(source) = current.as_ref() else { bail!("the raw video has no frames") };
         batch.push((source.clone(), shutter_times(recording, plan, output_ms)));
         if batch.len() == workers || index == total - 1 {
-            for frame in compose_all(&compositor, plan, &batch) {
-                sink.write_all(frame.data())?;
+            let first = index + 1 - batch.len() as i64;
+            for (at, frame) in (first..).zip(compose_all(&compositor, plan, &batch)) {
+                match plan.time.fade_after_cut(at as f64 * frame_ms) {
+                    Some(progress) => {
+                        fading_from = fading_from.take().or_else(|| last_frame.take());
+                        match &fading_from {
+                            Some(from) => sink.write_all(&blended(from, &frame, progress))?,
+                            None => sink.write_all(frame.data())?,
+                        }
+                    }
+                    None => {
+                        fading_from = None;
+                        sink.write_all(frame.data())?;
+                    }
+                }
+                last_frame = Some(frame);
             }
             batch.clear();
             progress((index + 1) as f64 / total as f64);
@@ -459,6 +474,11 @@ pub fn render_with_progress(recording: &Recording, plan: &Plan, output: &Path, p
         bail!("ffmpeg could not encode {}", output.display());
     }
     Ok(())
+}
+
+fn blended(from: &Pixmap, to: &Pixmap, progress: f64) -> Vec<u8> {
+    let share = (progress.clamp(0.0, 1.0) * 256.0) as u32;
+    from.data().iter().zip(to.data()).map(|(a, b)| ((*a as u32 * (256 - share) + *b as u32 * share) / 256) as u8).collect()
 }
 
 fn shutter_times(recording: &Recording, plan: &Plan, output_ms: f64) -> Vec<f64> {
@@ -696,6 +716,42 @@ mod tests {
         let (output_ms, _) = snapped_to_frame(&recording, &plan, 1_700.0);
         let frame = exact_frame(&recording, &plan, &c, &late, output_ms);
         assert!(near(rgb(&frame, 5, 5), Rgb([0, 0, 254])), "{:?}", rgb(&frame, 5, 5));
+    }
+
+    #[test]
+    fn blends_two_frames_by_how_far_the_fade_has_got() {
+        let solid = |shade| {
+            let mut pixmap = Pixmap::new(2, 2).unwrap();
+            pixmap.fill(Color::from_rgba8(shade, shade, shade, 255));
+            pixmap
+        };
+        let (from, to) = (solid(0), solid(200));
+
+        assert_eq!(blended(&from, &to, 0.0)[0], 0);
+        assert_eq!(blended(&from, &to, 0.5)[0], 100);
+        assert_eq!(blended(&from, &to, 1.0)[0], 200);
+        assert_eq!(blended(&from, &to, 0.5)[3], 255, "the frame turned see-through");
+    }
+
+    #[test]
+    fn fades_across_a_cut_in_a_real_render() {
+        let dir = std::env::temp_dir().join(format!("reel-fade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("raw.mp4");
+        let filter = "color=black:s=64x36:r=25:d=2[a];color=white:s=64x36:r=25:d=2[b];[a][b]concat=n=2:v=1[out]";
+        let made = Command::new("ffmpeg").args(["-v", "error", "-y", "-filter_complex", filter, "-map", "[out]", "-pix_fmt", "yuv444p"]).arg(&video).status().unwrap();
+        assert!(made.success());
+        let timeline = crate::timeline::Timeline { speeds: vec![crate::timeline::SpeedSpan { start_ms: 1_500.0, end_ms: 2_500.0, speed: None }], ..Default::default() };
+        let style = Style { cursor: CursorStyle { show: false, ..CursorStyle::default() }, background: Background { fill: Fill::None, ..Background::default() }, ..Style::default() };
+        let recording = Recording { video, size: [64, 36], scale: 1, fps: 25, duration_ms: 4_000.0, events: vec![], style, timeline: Some(timeline), imported: false, cuts: vec![] };
+        let output = dir.join("out.mp4");
+
+        render(&recording, &plan_for(&recording), &output).unwrap();
+
+        let decoded = Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(&output).args(["-f", "rawvideo", "-pix_fmt", "gray", "-"]).output().unwrap();
+        let centres: Vec<u8> = decoded.stdout.chunks_exact(64 * 36).map(|frame| frame[36 * 32]).collect();
+        let between = centres.iter().filter(|shade| (40..215).contains(*shade)).count();
+        assert!(between >= 3, "only {between} frames between black and white: {centres:?}");
     }
 
     #[test]

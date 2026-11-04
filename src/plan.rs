@@ -46,6 +46,7 @@ pub struct Ripple {
     pub progress: f64,
 }
 
+const CUT_FADE_MS: f64 = 240.0;
 const PRESS_LEAD_MS: f64 = 60.0;
 const PRESS_MS: f64 = 140.0;
 const RELEASE_MS: f64 = 80.0;
@@ -272,6 +273,9 @@ fn lerp_view(a: View, b: View, p: f64) -> View {
 fn curve(from: (f64, f64), to: (f64, f64), p: f64) -> (f64, f64) {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let distance = (dx * dx + dy * dy).sqrt();
+    if distance == 0.0 {
+        return from;
+    }
     let bend = 0.12 * distance;
     let control = ((from.0 + to.0) / 2.0 - dy / distance * bend, (from.1 + to.1) / 2.0 + dx / distance * bend);
     let q = 1.0 - p;
@@ -324,6 +328,19 @@ impl TimeMap {
 
     pub fn output_duration_ms(&self) -> f64 {
         self.segments.iter().map(Segment::output_ms).sum()
+    }
+
+    /// How far through its fade the frame at this output time is, if a cut has just passed: a cut's
+    /// jump in the picture otherwise reads as a flash.
+    pub fn fade_after_cut(&self, output_ms: f64) -> Option<f64> {
+        let mut elapsed = 0.0;
+        for segment in &self.segments {
+            if segment.speed.is_infinite() && elapsed > 0.0 && output_ms >= elapsed && output_ms < elapsed + CUT_FADE_MS {
+                return Some((output_ms - elapsed) / CUT_FADE_MS);
+            }
+            elapsed += segment.output_ms();
+        }
+        None
     }
 
     /// Where a source time lands in the output. A source time inside a cut lands just after it.
@@ -698,6 +715,26 @@ mod tests {
     }
 
     #[test]
+    fn goes_back_to_an_arrow_once_the_clicked_element_has_gone() {
+        let link = Event::Click { at_ms: 2_000.0, target: BUTTON, frame: BUTTON, pointer: Pointer::Hand };
+        let plan = plan(&[link, Event::Hover { at_ms: 2_500.0, pointer: Pointer::Arrow }], 8_000.0);
+
+        assert_eq!(plan.cursor_at(2_100.0).pointer, Pointer::Hand);
+        assert_eq!(plan.cursor_at(3_000.0).pointer, Pointer::Arrow);
+        let resting = plan.cursor_at(3_000.0);
+        assert!(close(resting.x, 950.0) && close(resting.y, 516.0), "the cursor moved: {resting:?}");
+        assert!(plan.cursor_at(2_450.0).x.is_finite(), "a move to the same spot broke the position");
+    }
+
+    #[test]
+    fn keeps_the_cursor_as_it_is_when_the_element_is_still_there() {
+        let link = Event::Click { at_ms: 2_000.0, target: BUTTON, frame: BUTTON, pointer: Pointer::Hand };
+        let events = [link, Event::Hover { at_ms: 2_500.0, pointer: Pointer::Hand }];
+
+        assert_eq!(Timeline::auto(&events, 8_000.0, FRAME, &Style::default()).moves.len(), 1);
+    }
+
+    #[test]
     fn stays_an_arrow_when_not_adaptive() {
         let link = Event::Click { at_ms: 2_000.0, target: BUTTON, frame: BUTTON, pointer: Pointer::Hand };
         let plan = with_cursor(CursorStyle { adaptive: false, ..CursorStyle::default() }, &[link], 6_000.0);
@@ -793,6 +830,26 @@ mod tests {
         assert!(close(plan.time.output_duration_ms(), 5_000.0));
         assert!(close(plan.time.source_ms(1_500.0), 2_000.0));
         assert!(close(plan.time.source_ms(3_000.0), 6_000.0));
+    }
+
+    #[test]
+    fn fades_for_a_moment_after_a_cut_and_not_after_a_speed_change() {
+        let speeds = vec![SpeedSpan { start_ms: 1_000.0, end_ms: 2_000.0, speed: Some(2.0) }, SpeedSpan { start_ms: 4_000.0, end_ms: 6_000.0, speed: None }];
+        let time = TimeMap::new(&speeds, 8_000.0);
+        let cut_at = 3_500.0;
+
+        assert_eq!(time.fade_after_cut(cut_at - 1.0), None);
+        assert_eq!(time.fade_after_cut(cut_at), Some(0.0));
+        assert_eq!(time.fade_after_cut(cut_at + CUT_FADE_MS / 2.0), Some(0.5));
+        assert_eq!(time.fade_after_cut(cut_at + CUT_FADE_MS), None);
+        assert_eq!(time.fade_after_cut(1_250.0), None);
+    }
+
+    #[test]
+    fn does_not_fade_from_nothing_when_a_take_opens_on_a_cut() {
+        let time = TimeMap::new(&[SpeedSpan { start_ms: 0.0, end_ms: 1_000.0, speed: None }], 4_000.0);
+
+        assert_eq!(time.fade_after_cut(10.0), None);
     }
 
     #[test]

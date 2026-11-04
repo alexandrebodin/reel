@@ -43,6 +43,8 @@ pub enum Signal {
     /// `value` is left out for passwords and card numbers.
     Input { t: f64, target: Rect, frame: Rect, cursor: Option<String>, selector: String, value: Option<String> },
     Overlay { t: f64, frame: Rect },
+    /// What the cursor would show at the spot of the last click, a moment after it.
+    Hover { t: f64, cursor: Option<String> },
     Navigation { t: f64, url: String },
     Hold { t: f64, until: f64 },
 }
@@ -50,7 +52,7 @@ pub enum Signal {
 impl Signal {
     fn at(&self) -> f64 {
         match self {
-            Signal::Click { t, .. } | Signal::Input { t, .. } | Signal::Overlay { t, .. } | Signal::Navigation { t, .. } | Signal::Hold { t, .. } => *t,
+            Signal::Click { t, .. } | Signal::Input { t, .. } | Signal::Overlay { t, .. } | Signal::Hover { t, .. } | Signal::Navigation { t, .. } | Signal::Hold { t, .. } => *t,
         }
     }
 
@@ -160,6 +162,7 @@ impl Take {
                     events.push(Event::Click { at_ms: at(*t), target: *target, frame: *frame, pointer: Pointer::from_css(cursor.as_deref()) });
                 }
                 Signal::Overlay { t, frame } => events.push(Event::Focus { at_ms: at(*t), frame: *frame }),
+                Signal::Hover { t, cursor } => events.push(Event::Hover { at_ms: at(*t), pointer: Pointer::from_css(cursor.as_deref()) }),
                 Signal::Hold { t, until } => {
                     typing = None;
                     events.push(Event::Pause { at_ms: at(*t), until_ms: at(*until) });
@@ -209,7 +212,7 @@ impl Take {
                         steps.push(Step::Goto { url: url.clone() });
                     }
                 }
-                Signal::Overlay { .. } => {}
+                Signal::Overlay { .. } | Signal::Hover { .. } => {}
             }
         }
         (steps, left_out)
@@ -224,7 +227,7 @@ fn listener_js() -> String {
   if (window.__reelListening) return;
   window.__reelListening = true;
   const send = (signal) => window.{BINDING}(JSON.stringify({{ t: Date.now(), ...signal }}));
-  const box = (r) => ({{ x: r.x, y: r.y, w: r.width, h: r.height }});
+  const rect = (r) => ({{ x: r.x, y: r.y, w: r.width, h: r.height }});
   const clickable = 'button, a, summary, label, [role=button], [role=menuitem], [role=option], [role=radio], [role=tab], [role=checkbox]';
   const visible = (el) => el.getClientRects().length > 0;
   const label = (c) => (c.innerText || c.value || c.getAttribute('aria-label') || '').trim();
@@ -264,11 +267,17 @@ fn listener_js() -> String {
     }}
     return own;
   }};
-  const describe = (el) => ({{ target: box(el.getBoundingClientRect()), frame: box(frameOf(el)), cursor: getComputedStyle(el).cursor, selector: selectorOf(el) }});
+  const describe = (el) => ({{ target: rect(el.getBoundingClientRect()), frame: rect(frameOf(el)), cursor: getComputedStyle(el).cursor, selector: selectorOf(el) }});
   addEventListener('click', (e) => {{
     if (!(e.target instanceof Element)) return;
     const el = e.target.closest(clickable) ?? e.target;
     send({{ kind: 'click', ...describe(el) }});
+    const box = el.getBoundingClientRect();
+    const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+    setTimeout(() => {{
+      const under = document.elementFromPoint(x, y);
+      send({{ kind: 'hover', cursor: under ? getComputedStyle(under).cursor : null }});
+    }}, 500);
   }}, true);
   addEventListener('input', (e) => {{
     const el = e.target;
@@ -609,6 +618,16 @@ mod tests {
         let events = take(vec![Signal::Overlay { t: START + 500.0, frame: ROW }, Signal::Hold { t: START + 900.0, until: START + 2_900.0 }]).events();
 
         assert_eq!(events, [Event::Focus { at_ms: 500.0, frame: ROW }, Event::Pause { at_ms: 900.0, until_ms: 2_900.0 }]);
+    }
+
+    #[test]
+    fn turns_a_check_under_the_cursor_into_a_hover_and_keeps_it_out_of_the_replay() {
+        let hover = Signal::Hover { t: START + 500.0, cursor: Some("auto".into()) };
+        let take = take(vec![hover]);
+
+        assert_eq!(take.events(), [Event::Hover { at_ms: 500.0, pointer: Pointer::Arrow }]);
+        assert_eq!(take.steps().0, []);
+        assert_eq!(take.action_starts(), Vec::<f64>::new(), "a hover counted as an action to cut");
     }
 
     #[test]
