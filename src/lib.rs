@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod editor;
 pub mod events;
 pub mod plan;
 pub mod render;
@@ -9,10 +10,14 @@ pub mod style;
 pub mod timeline;
 
 use std::fs;
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
+use editor::Editor;
 use capture::{align_to_video, capture, AgentBrowser, Browser, Pacing, Recording};
 use render::{plan_for, render, video_duration_ms};
 use script::Script;
@@ -52,6 +57,22 @@ pub fn render_file(recording_path: &Path, output: Option<PathBuf>, style_overrid
     let output = output.unwrap_or_else(|| recording_path.with_file_name("render.mp4"));
     render(&recording, &plan_for(&recording), &output)?;
     Ok(output)
+}
+
+/// Opens a recording in the editor and serves it until the process ends.
+pub fn edit(path: &Path, open_browser: bool) -> Result<()> {
+    let editor = Arc::new(Editor::open(path)?);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let url = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
+    println!("{url}");
+    if open_browser {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        if let Err(error) = Command::new(opener).arg(&url).status() {
+            eprintln!("reel: could not open a browser ({error}): go to {url}");
+        }
+    }
+    server::serve(listener, Arc::new(move |request| editor.handle(request)))?;
+    Ok(())
 }
 
 #[cfg(test)]

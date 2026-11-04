@@ -1,9 +1,18 @@
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: reel <demo.json> [out.mp4] [--style key=value]...\n       reel --render <recording.json> [out.mp4] [--style key=value]...";
+const USAGE: &str = "usage: reel <demo.json> [out.mp4] [--style key=value]...\n       reel --render <recording.json> [out.mp4] [--style key=value]...\n       reel edit <recording.json> [--no-open]";
 
 fn main() {
     let (positional, style) = split_style_flags(std::env::args().skip(1).collect());
+    if let [command, path, flags @ ..] = positional.as_slice() {
+        if command == "edit" {
+            if let Err(error) = reel::edit(Path::new(path), !flags.iter().any(|f| f == "--no-open")) {
+                eprintln!("reel: {error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
     let result = match positional.as_slice() {
         [flag, recording, rest @ ..] if flag == "--render" => reel::render_file(Path::new(recording), rest.first().map(PathBuf::from), &style),
         [script, rest @ ..] if !script.starts_with('-') => reel::record(Path::new(script), rest.first().map(PathBuf::from), &style),
