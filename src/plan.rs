@@ -1,5 +1,5 @@
 use crate::events::{Event, Rect};
-use crate::style::{Clicks, CursorMotion, CursorStyle, Style};
+use crate::style::{Clicks, CursorMotion, CursorStyle, Style, ZoomAnimation};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -79,6 +79,7 @@ pub struct Plan {
     typing: Vec<(f64, f64)>,
     cursor_style: CursorStyle,
     click_style: Clicks,
+    zoom_animation: ZoomAnimation,
 }
 
 struct Move {
@@ -114,6 +115,7 @@ impl Plan {
                 .collect(),
             cursor_style: style.cursor.clone(),
             click_style: style.clicks.clone(),
+            zoom_animation: style.zoom.animation,
         }
     }
 
@@ -129,7 +131,10 @@ impl Plan {
                     return to;
                 }
                 let p = (t_ms - t0) / (t1 - t0);
-                return lerp_view(from, to, ease_in_out(p));
+                return match self.zoom_animation {
+                    ZoomAnimation::Smooth => lerp_view(from, to, ease_in_out(p)),
+                    ZoomAnimation::Dynamic => inside_frame(lerp_view(from, to, ease_out_back(p)), self.frame),
+                };
             }
         }
         self.camera[self.camera.len() - 1].1
@@ -325,6 +330,18 @@ fn line(from: (f64, f64), to: (f64, f64), p: f64) -> (f64, f64) {
     (from.0 + (to.0 - from.0) * p, from.1 + (to.1 - from.1) * p)
 }
 
+fn ease_out_back(p: f64) -> f64 {
+    const OVERSHOOT: f64 = 1.2;
+    let q = p.clamp(0.0, 1.0) - 1.0;
+    1.0 + (OVERSHOOT + 1.0) * q * q * q + OVERSHOOT * q * q
+}
+
+/// An overshoot on the way out would show more than the source has.
+fn inside_frame(view: View, frame: Size) -> View {
+    let (w, h) = (view.w.min(frame.w), view.h.min(frame.h));
+    View { x: view.x.clamp(0.0, frame.w - w), y: view.y.clamp(0.0, frame.h - h), w, h }
+}
+
 fn ease_in_out(p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
     if p < 0.5 {
@@ -487,7 +504,7 @@ mod tests {
 
     #[test]
     fn zooms_as_far_as_the_style_asks() {
-        let style = Style { zoom: Zoom { level: 1.2 }, ..Style::default() };
+        let style = Style { zoom: Zoom { level: 1.2, ..Zoom::default() }, ..Style::default() };
         let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &style);
 
         assert!(close(plan.camera_at(3_000.0).zoom(FRAME), 1.2), "zoom was {}", plan.camera_at(3_000.0).zoom(FRAME));
@@ -495,11 +512,39 @@ mod tests {
 
     #[test]
     fn never_moves_the_camera_at_a_zoom_level_of_one() {
-        let style = Style { zoom: Zoom { level: 1.0 }, ..Style::default() };
+        let style = Style { zoom: Zoom { level: 1.0, ..Zoom::default() }, ..Style::default() };
         let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME, &style);
 
         for t in [0.0, 2_500.0, 3_000.0, 5_000.0] {
             assert_eq!(plan.camera_at(t), overview(FRAME), "the camera moved at {t}");
+        }
+    }
+
+    fn dynamic(events: &[Event], duration_ms: f64) -> Plan {
+        let zoom = Zoom { animation: ZoomAnimation::Dynamic, ..Zoom::default() };
+        Plan::new(events, duration_ms, FRAME, &Style { zoom, ..Style::default() })
+    }
+
+    #[test]
+    fn darts_ahead_of_a_smooth_zoom_and_settles_on_the_same_view() {
+        let events = [click(2_000.0, BUTTON)];
+        let (smooth, dynamic) = (plan(&events, 6_000.0), dynamic(&events, 6_000.0));
+
+        assert!(dynamic.camera_at(2_150.0).zoom(FRAME) > smooth.camera_at(2_150.0).zoom(FRAME) + 0.05);
+        let peak = (0..70).map(|i| dynamic.camera_at(2_000.0 + i as f64 * 10.0).zoom(FRAME)).fold(0.0, f64::max);
+        assert!(peak > ZOOM, "never overshot: {peak}");
+        assert!(close(dynamic.camera_at(3_000.0).zoom(FRAME), ZOOM));
+    }
+
+    #[test]
+    fn keeps_a_dynamic_view_inside_the_frame_on_every_tick() {
+        let corner = Rect { x: 1880.0, y: 4.0, w: 32.0, h: 32.0 };
+        let plan = dynamic(&[click(2_000.0, corner)], 6_000.0);
+
+        for i in 0..600 {
+            let view = plan.camera_at(i as f64 * 10.0);
+            assert!(view.w <= FRAME.w && view.x >= 0.0 && view.y >= 0.0, "{view:?}");
+            assert!(view.x + view.w <= FRAME.w + 0.01 && view.y + view.h <= FRAME.h + 0.01, "{view:?}");
         }
     }
 

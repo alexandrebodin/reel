@@ -120,12 +120,63 @@ impl Compositor {
             }
         }
 
-        if let Some(cursor) = cursor.filter(|c| self.style.cursor.show && c.opacity > 0.0) {
-            let (x, y) = place(cursor.x, cursor.y);
-            let size = CURSOR_SIZE / 20.0 * self.density * magnification.powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * cursor.pressed as f32);
-            self.draw_cursor(&mut out, x, y, size, cursor.opacity as f32);
+        self.place_cursor(&mut out, view, cursor, 0.0, 0.0);
+        out
+    }
+
+    /// Draws the cursor on `out`, whose top left corner is at (`left`, `top`) of the frame.
+    fn place_cursor(&self, out: &mut Pixmap, view: View, cursor: Option<Cursor>, left: f32, top: f32) {
+        let Some(cursor) = cursor.filter(|c| self.style.cursor.show && c.opacity > 0.0) else { return };
+        let scale = self.inner.width() / view.w as f32;
+        let (x, y) = (self.inner.x() + (cursor.x - view.x) as f32 * scale, self.inner.y() + (cursor.y - view.y) as f32 * scale);
+        let size = CURSOR_SIZE / 20.0 * self.density * (scale / self.density).powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * cursor.pressed as f32);
+        self.draw_cursor(out, x - left, y - top, size, cursor.opacity as f32);
+    }
+
+    /// Averages the frame across the shots of one shutter. Only what moves is drawn more than once:
+    /// compositing the whole video for each shot of a cursor move would be most of the render time.
+    pub fn compose_blurred(&self, source: &Pixmap, shots: &[(View, Cursor)], ripples: &[Ripple]) -> Pixmap {
+        let (first_view, first_cursor) = shots[0];
+        if shots.iter().all(|(view, cursor)| *view == first_view && *cursor == first_cursor) {
+            return self.compose(source, first_view, Some(first_cursor), ripples);
+        }
+        if shots.iter().any(|(view, _)| *view != first_view) {
+            let frames = shots.iter().map(|(view, cursor)| self.compose(source, *view, Some(*cursor), ripples));
+            return average(frames, shots.len() as u32);
+        }
+        let mut out = self.compose(source, first_view, None, ripples);
+        let (left, top, right, bottom) = self.cursor_bounds(first_view, shots);
+        let Some(area) = tiny_skia::IntRect::from_ltrb(left, top, right, bottom) else { return out };
+        let Some(base) = out.clone_rect(area) else { return out };
+        let crops = shots.iter().map(|(_, cursor)| {
+            let mut crop = base.clone();
+            self.place_cursor(&mut crop, first_view, Some(*cursor), left as f32, top as f32);
+            crop
+        });
+        let trail = average(crops, shots.len() as u32);
+        let stride = out.width() as usize * 4;
+        for (row, pixels) in trail.data().chunks_exact(trail.width() as usize * 4).enumerate() {
+            let start = (top as usize + row) * stride + left as usize * 4;
+            out.data_mut()[start..start + pixels.len()].copy_from_slice(pixels);
         }
         out
+    }
+
+    fn cursor_bounds(&self, view: View, shots: &[(View, Cursor)]) -> (i32, i32, i32, i32) {
+        let scale = self.inner.width() / view.w as f32;
+        let reach = CURSOR_SIZE * self.density * (scale / self.density).powf(0.6) * self.style.cursor.size as f32 * 1.5;
+        let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for (_, cursor) in shots {
+            let (x, y) = (self.inner.x() + (cursor.x - view.x) as f32 * scale, self.inner.y() + (cursor.y - view.y) as f32 * scale);
+            (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
+        }
+        let (width, height) = (self.background.width() as i32, self.background.height() as i32);
+        (
+            ((left - reach) as i32).clamp(0, width),
+            ((top - reach) as i32).clamp(0, height),
+            ((right + reach) as i32).clamp(0, width),
+            ((bottom + reach) as i32).clamp(0, height),
+        )
     }
 
     fn draw_cursor(&self, out: &mut Pixmap, x: f32, y: f32, size: f32, opacity: f32) {
@@ -152,6 +203,25 @@ impl Compositor {
 }
 
 const CURSOR_SIZE: f32 = 26.0;
+
+fn average(frames: impl Iterator<Item = Pixmap>, count: u32) -> Pixmap {
+    let mut sums: Vec<u32> = Vec::new();
+    let mut last = None;
+    for frame in frames {
+        if sums.is_empty() {
+            sums = vec![0; frame.data().len()];
+        }
+        for (sum, byte) in sums.iter_mut().zip(frame.data()) {
+            *sum += *byte as u32;
+        }
+        last = Some(frame);
+    }
+    let mut out = last.expect("a shutter has at least one shot");
+    for (byte, sum) in out.data_mut().iter_mut().zip(sums) {
+        *byte = ((sum + count / 2) / count) as u8;
+    }
+    out
+}
 
 fn fill_pixmap(fill: &Fill, width: u32, height: u32) -> Result<Pixmap> {
     let mut pixmap = Pixmap::new(width, height).expect("frame size");
@@ -271,9 +341,12 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     let mut current: Option<Arc<Pixmap>> = None;
     let mut decoded: i64 = -1;
     let total = (plan.time.output_duration_ms() / 1_000.0 * fps).ceil() as i64;
-    let mut batch: Vec<(Arc<Pixmap>, f64)> = Vec::with_capacity(workers);
+    let (shots, shutter) = recording.style.motion_blur.shutter();
+    let frame_ms = 1_000.0 / fps;
+    let mut batch: Vec<(Arc<Pixmap>, Vec<f64>)> = Vec::with_capacity(workers);
     for index in 0..total {
-        let source_ms = plan.time.source_ms(index as f64 * 1_000.0 / fps);
+        let output_ms = index as f64 * frame_ms;
+        let source_ms = plan.time.source_ms(output_ms);
         let wanted = (source_ms * fps / 1_000.0).floor() as i64;
         while decoded < wanted {
             match frames.read_exact(&mut buffer) {
@@ -286,7 +359,8 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
             }
         }
         let Some(source) = current.as_ref() else { bail!("the raw video has no frames") };
-        batch.push((source.clone(), source_ms));
+        let times = (0..shots).map(|shot| plan.time.source_ms(output_ms + shot as f64 / shots as f64 * shutter * frame_ms)).collect();
+        batch.push((source.clone(), times));
         if batch.len() == workers || index == total - 1 {
             for frame in compose_all(&compositor, plan, &batch) {
                 sink.write_all(frame.data())?;
@@ -303,12 +377,15 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     Ok(())
 }
 
-fn compose_all(compositor: &Compositor, plan: &Plan, batch: &[(Arc<Pixmap>, f64)]) -> Vec<Pixmap> {
+fn compose_all(compositor: &Compositor, plan: &Plan, batch: &[(Arc<Pixmap>, Vec<f64>)]) -> Vec<Pixmap> {
     thread::scope(|scope| {
         let workers: Vec<_> = batch
             .iter()
-            .map(|(source, at_ms)| {
-                scope.spawn(|| compositor.compose(source, plan.camera_at(*at_ms), Some(plan.cursor_at(*at_ms)), &plan.ripples_at(*at_ms)))
+            .map(|(source, times)| {
+                scope.spawn(|| {
+                    let shots: Vec<(View, Cursor)> = times.iter().map(|t| (plan.camera_at(*t), plan.cursor_at(*t))).collect();
+                    compositor.compose_blurred(source, &shots, &plan.ripples_at(times[0]))
+                })
             })
             .collect();
         workers.into_iter().map(|w| w.join().expect("a compositing thread panicked")).collect()
@@ -650,6 +727,55 @@ mod tests {
         let radius = 18;
         let edge = rgb(&outline, 100 + radius, 50).0;
         assert!(edge[0] < 200, "the outline has no edge at {radius}: {edge:?}");
+    }
+
+    fn at_x(x: f64) -> (View, Cursor) {
+        (FULL, Cursor { x, ..SPOT })
+    }
+
+    #[test]
+    fn leaves_a_frame_with_nothing_moving_exactly_as_it_is() {
+        let c = compositor([200, 100], 1, &flat(BLACK));
+        let still = c.compose_blurred(&white_frame(), &[at_x(60.0), at_x(60.0), at_x(60.0)], &[]);
+
+        assert_eq!(still.data(), c.compose(&white_frame(), FULL, Some(at_x(60.0).1), &[]).data());
+    }
+
+    #[test]
+    fn smears_a_moving_cursor_and_leaves_the_rest_alone() {
+        let c = compositor([200, 100], 1, &flat(BLACK));
+        let shots = [at_x(40.0), at_x(55.0), at_x(70.0), at_x(85.0)];
+
+        let out = c.compose_blurred(&white_frame(), &shots, &[]);
+
+        let partial = (30..120).flat_map(|x| (30..60).map(move |y| (x, y))).filter(|&(x, y)| (20..235).contains(&rgb(&out, x, y).0[0])).count();
+        let sharp = c.compose(&white_frame(), FULL, Some(at_x(40.0).1), &[]);
+        let sharp_partial = (30..120).flat_map(|x| (30..60).map(move |y| (x, y))).filter(|&(x, y)| (20..235).contains(&rgb(&sharp, x, y).0[0])).count();
+        assert!(partial > sharp_partial * 2, "{partial} blended pixels against {sharp_partial}");
+        assert_eq!(rgb(&out, 170, 80), WHITE);
+    }
+
+    #[test]
+    fn draws_a_blurred_cursor_in_the_same_place_as_averaging_whole_frames() {
+        let c = compositor([200, 100], 1, &flat(BLACK));
+        let shots = [at_x(40.0), at_x(60.0), at_x(190.0)];
+
+        let out = c.compose_blurred(&white_frame(), &shots, &[]);
+
+        let whole = average(shots.iter().map(|(view, cursor)| c.compose(&white_frame(), *view, Some(*cursor), &[])), 3);
+        assert_eq!(out.data(), whole.data());
+    }
+
+    #[test]
+    fn blends_the_views_of_a_moving_camera() {
+        let c = compositor([200, 100], 1, &flat(BLACK));
+        let hidden = Cursor { opacity: 0.0, ..SPOT };
+        let shots = [(FULL, hidden), (View { x: 100.0, y: 25.0, w: 100.0, h: 50.0 }, hidden)];
+
+        let out = c.compose_blurred(&halves(), &shots, &[]);
+
+        let left = rgb(&out, 20, 50).0;
+        assert!(left[0] > 80 && left[2] > 80, "left edge is {left:?}, not red and blue averaged");
     }
 
     #[test]

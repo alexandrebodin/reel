@@ -12,6 +12,43 @@ pub struct Style {
     pub background: Background,
     pub cursor: CursorStyle,
     pub clicks: Clicks,
+    pub motion_blur: MotionBlur,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotionBlur {
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for MotionBlur {
+    fn default() -> MotionBlur {
+        MotionBlur::Off
+    }
+}
+
+impl MotionBlur {
+    /// Samples averaged per frame, and the share of the frame's time they span.
+    pub fn shutter(self) -> (u32, f64) {
+        match self {
+            MotionBlur::Off => (1, 0.0),
+            MotionBlur::Low => (4, 0.35),
+            MotionBlur::Medium => (8, 0.6),
+            MotionBlur::High => (12, 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZoomAnimation {
+    /// Eases in and out over the whole move.
+    Smooth,
+    /// Darts most of the way, then settles with a slight overshoot.
+    Dynamic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -208,11 +245,12 @@ impl Default for Background {
 pub struct Zoom {
     /// The furthest the camera goes in: 1 never zooms.
     pub level: f64,
+    pub animation: ZoomAnimation,
 }
 
 impl Default for Zoom {
     fn default() -> Zoom {
-        Zoom { level: 1.4 }
+        Zoom { level: 1.4, animation: ZoomAnimation::Smooth }
     }
 }
 
@@ -354,6 +392,16 @@ mod tests {
         assert_eq!(style.clicks.color, Rgb([10, 132, 255]));
         assert_eq!(style.clicks.style, RippleStyle::Outline);
         assert!(with(&["clicks.color=mauve"]).is_err());
+    }
+
+    #[test]
+    fn reads_motion_options() {
+        let style = with(&["motion_blur=medium", "zoom.animation=dynamic"]).unwrap();
+
+        assert_eq!(style.motion_blur, MotionBlur::Medium);
+        assert_eq!(style.zoom.animation, ZoomAnimation::Dynamic);
+        assert_eq!(Style::default().motion_blur, MotionBlur::Off);
+        assert!(with(&["motion_blur=extreme"]).is_err());
     }
 
     #[test]
