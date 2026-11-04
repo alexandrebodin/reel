@@ -15,6 +15,9 @@ pub struct Script {
     /// agent-browser state file (cookies, storage) for a signed-in session.
     #[serde(default)]
     pub state: Option<PathBuf>,
+    /// Steps run before recording starts: navigation, sign-in, dismissing banners.
+    #[serde(default)]
+    pub setup: Vec<Step>,
     pub steps: Vec<Step>,
 }
 

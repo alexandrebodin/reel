@@ -85,6 +85,10 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
         None => browser.run(&["open", &script.url], None)?,
     };
     browser.run(&["set", "viewport", &script.size[0].to_string(), &script.size[1].to_string()], None)?;
+    let mut last_action = Instant::now() - pacing.between_actions;
+    for step in &script.setup {
+        perform(browser, step, pacing, &mut last_action, &|| 0.0)?;
+    }
     sleep(pacing.settle);
 
     browser.run(&["record", "start", &video_arg, "--fps", &fps], None)?;
@@ -93,46 +97,59 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     sleep(pacing.settle);
 
     let mut events = Vec::new();
-    let mut last_action = Instant::now() - pacing.between_actions;
     for step in &script.steps {
-        match step {
-            Step::Click { target } => {
-                let (rect, selector) = locate(browser, target)?;
-                sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
-                events.push(Event::Click { at_ms: elapsed(), target: rect });
-                browser.run(&["click", &selector], None)?;
-                last_action = Instant::now();
-            }
-            Step::Type { target, text } => {
-                let (rect, selector) = locate(browser, target)?;
-                sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
-                let at_ms = elapsed();
-                browser.run(&["click", &selector], None)?;
-                for character in text.chars() {
-                    browser.run(&["type", &selector, &character.to_string()], None)?;
-                    sleep(pacing.between_keys);
-                }
-                events.push(Event::Type { at_ms, until_ms: elapsed(), target: rect });
-                last_action = Instant::now();
-            }
-            Step::Pause { ms } => {
-                let at_ms = elapsed();
-                sleep(Duration::from_millis(*ms));
-                events.push(Event::Pause { at_ms, until_ms: elapsed() });
-            }
-            Step::WaitFor { target } => {
-                locate(browser, target)?;
-            }
-            Step::Goto { url } => {
-                browser.run(&["open", url], None)?;
-            }
-        }
+        events.extend(perform(browser, step, pacing, &mut last_action, &elapsed)?);
     }
     sleep(pacing.settle);
     let duration_ms = elapsed();
     browser.run(&["record", "stop"], None)?;
 
     Ok(Recording { video: video.to_path_buf(), size: script.size, fps: script.fps, duration_ms, events })
+}
+
+/// Runs one step and returns what it did on screen, timed by `elapsed`.
+fn perform(
+    browser: &mut dyn Browser,
+    step: &Step,
+    pacing: &Pacing,
+    last_action: &mut Instant,
+    elapsed: &dyn Fn() -> f64,
+) -> Result<Option<Event>> {
+    match step {
+        Step::Click { target } => {
+            let (rect, selector) = locate(browser, target)?;
+            sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
+            let event = Event::Click { at_ms: elapsed(), target: rect };
+            browser.run(&["click", &selector], None)?;
+            *last_action = Instant::now();
+            Ok(Some(event))
+        }
+        Step::Type { target, text } => {
+            let (rect, selector) = locate(browser, target)?;
+            sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
+            let at_ms = elapsed();
+            browser.run(&["click", &selector], None)?;
+            for character in text.chars() {
+                browser.run(&["type", &selector, &character.to_string()], None)?;
+                sleep(pacing.between_keys);
+            }
+            *last_action = Instant::now();
+            Ok(Some(Event::Type { at_ms, until_ms: elapsed(), target: rect }))
+        }
+        Step::Pause { ms } => {
+            let at_ms = elapsed();
+            sleep(Duration::from_millis(*ms));
+            Ok(Some(Event::Pause { at_ms, until_ms: elapsed() }))
+        }
+        Step::WaitFor { target } => {
+            locate(browser, target)?;
+            Ok(None)
+        }
+        Step::Goto { url } => {
+            browser.run(&["open", url], None)?;
+            Ok(None)
+        }
+    }
 }
 
 /// Finds a visible element, scrolls it into view, tags it so the click hits that same element,
@@ -203,7 +220,7 @@ mod tests {
     }
 
     fn script(steps: Vec<Step>) -> Script {
-        Script { url: "about:blank".into(), size: [1920, 1080], fps: 60, state: None, steps }
+        Script { url: "about:blank".into(), size: [1920, 1080], fps: 60, state: None, setup: vec![], steps }
     }
 
     fn no_pacing() -> Pacing {
@@ -232,6 +249,20 @@ mod tests {
         let stop = browser.commands.iter().position(|c| c == "record stop").unwrap();
         let click = browser.commands.iter().position(|c| c.starts_with("click")).unwrap();
         assert!(start < click && click < stop);
+    }
+
+    #[test]
+    fn runs_setup_steps_before_recording_and_logs_none_of_them() {
+        let mut browser = FakeBrowser::default();
+        let mut demo = script(vec![Step::Click { target: "#go".into() }]);
+        demo.setup = vec![Step::Goto { url: "about:setup".into() }, Step::Click { target: "#cookie-ok".into() }];
+
+        let recording = capture(&demo, &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
+
+        let start = browser.commands.iter().position(|c| c.starts_with("record start")).unwrap();
+        let setup = browser.commands.iter().position(|c| c == "open about:setup").unwrap();
+        assert!(setup < start);
+        assert_eq!(recording.events.len(), 1);
     }
 
     #[test]
