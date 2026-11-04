@@ -234,7 +234,8 @@ fn listener_js() -> String {
   }};
   const quoted = (value) => `"${{value.replace(/["\\]/g, '\\$&')}}"`;
   const selectorOf = (el) => {{
-    if (el.id && unique(`[id=${{quoted(el.id)}}]`, el)) return /^[A-Za-z][\w-]*$/.test(el.id) ? `#${{el.id}}` : `[id=${{quoted(el.id)}}]`;
+    const generated = /^(base-ui-|radix-|headlessui-|react-aria|:r|_r_)/.test(el.id);
+    if (el.id && !generated && unique(`[id=${{quoted(el.id)}}]`, el)) return /^[A-Za-z][\w-]*$/.test(el.id) ? `#${{el.id}}` : `[id=${{quoted(el.id)}}]`;
     for (const attribute of ['data-testid', 'data-test', 'name', 'aria-label', 'placeholder']) {{
       const value = el.getAttribute(attribute);
       const selector = value && `${{el.tagName.toLowerCase()}}[${{attribute}}=${{quoted(value)}}]`;
@@ -279,13 +280,16 @@ fn listener_js() -> String {
   send({{ kind: 'navigation', url: location.href }});
   const overlay = {OVERLAY_JS};
   let shown = null;
+  let previous = null;
   setInterval(() => {{
     const now = overlay();
     const key = now && `${{now.x}},${{now.y}},${{now.w}},${{now.h}}`;
-    if (key !== shown) {{
-      shown = key;
+    const settled = key === previous;
+    previous = key;
+    if (settled && !!key !== !!shown) {{
       if (now) send({{ kind: 'overlay', frame: now }});
     }}
+    if (settled) shown = key;
   }}, 200);
 }})();"#
     )
@@ -790,5 +794,14 @@ mod tests {
 
         assert!(script.contains("password|cc-|one-time-code"));
         assert!(script.contains(BINDING));
+    }
+
+    #[test]
+    fn does_not_trust_generated_ids_in_the_replay() {
+        let script = listener_js();
+
+        for generated in ["base-ui-", "radix-", ":r", "_r_"] {
+            assert!(script.contains(generated), "{generated}");
+        }
     }
 }
