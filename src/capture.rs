@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -80,10 +80,10 @@ pub struct Recording {
 pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing: &Pacing) -> Result<Recording> {
     let video_arg = video.to_string_lossy().to_string();
     let fps = script.fps.to_string();
-    match &script.state {
-        Some(state) => navigate(browser, &["--state", &state.to_string_lossy(), "open", &script.url])?,
-        None => navigate(browser, &["open", &script.url])?,
+    if let Some(state) = &script.state {
+        sign_in(browser, state, &script.url)?;
     }
+    navigate(browser, &["open", &script.url])?;
     browser.run(&["set", "viewport", &script.size[0].to_string(), &script.size[1].to_string()], None)?;
     let mut last_action = Instant::now() - pacing.between_actions;
     for step in &script.setup {
@@ -150,6 +150,60 @@ fn perform(
             Ok(None)
         }
     }
+}
+
+#[derive(Deserialize)]
+struct BrowserState {
+    cookies: Vec<StateCookie>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateCookie {
+    name: String,
+    value: String,
+    path: Option<String>,
+    expires: Option<f64>,
+    #[serde(default)]
+    http_only: bool,
+    same_site: Option<String>,
+}
+
+/// Sets the state file's live cookies itself: agent-browser's --state dropped Studio's session
+/// cookie. Scoping them to the demo's origin also lets a state saved on another port work.
+fn sign_in(browser: &mut dyn Browser, state: &Path, url: &str) -> Result<()> {
+    let text = std::fs::read_to_string(state).with_context(|| format!("reading {}", state.display()))?;
+    let state: BrowserState = serde_json::from_str(&text).context("parsing the state file")?;
+    let origin = origin_of(url);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+    browser.run(&["open"], None)?;
+    for cookie in &state.cookies {
+        let expires = cookie.expires.filter(|e| *e >= 0.0);
+        if expires.is_some_and(|e| e <= now) {
+            continue;
+        }
+        let mut args = vec!["cookies", "set", &cookie.name, &cookie.value, "--url", origin];
+        if let Some(path) = &cookie.path {
+            args.extend(["--path", path]);
+        }
+        if cookie.http_only {
+            args.push("--httpOnly");
+        }
+        if let Some(same_site) = &cookie.same_site {
+            args.extend(["--sameSite", same_site]);
+        }
+        let expires = expires.map(|e| (e as i64).to_string());
+        if let Some(expires) = &expires {
+            args.extend(["--expires", expires]);
+        }
+        browser.run(&args, None)?;
+    }
+    Ok(())
+}
+
+fn origin_of(url: &str) -> &str {
+    let host_start = url.find("://").map_or(0, |i| i + 3);
+    url[host_start..].find('/').map_or(url, |i| &url[..host_start + i])
 }
 
 /// A dev server can keep a page loading past agent-browser's timeout; the next step that looks
@@ -290,14 +344,37 @@ mod tests {
     }
 
     #[test]
-    fn signs_in_with_the_state_file_when_opening() {
+    fn sets_the_state_files_live_cookies_for_the_demo_origin_before_opening_it() {
+        let dir = std::env::temp_dir().join(format!("reel-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("state.json");
+        std::fs::write(
+            &state,
+            r#"{ "cookies": [
+                { "name": "token", "value": "a%2Bb", "domain": "localhost", "path": "/", "expires": 4102444800.5, "httpOnly": true, "sameSite": "Lax" },
+                { "name": "stale", "value": "old", "domain": "localhost", "path": "/", "expires": 1000.0, "httpOnly": true, "sameSite": "Lax" },
+                { "name": "for_the_session", "value": "x", "domain": "localhost", "path": "/", "expires": -1, "httpOnly": false, "sameSite": "None" }
+            ] }"#,
+        )
+        .unwrap();
         let mut browser = FakeBrowser::default();
         let mut demo = script(vec![]);
-        demo.state = Some(PathBuf::from("/auth/premium.json"));
+        demo.url = "http://localhost:4000/app/".into();
+        demo.state = Some(state);
 
         capture(&demo, &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
 
-        assert_eq!(browser.commands[0], "--state /auth/premium.json open about:blank");
+        let cookies: Vec<&String> = browser.commands.iter().filter(|c| c.starts_with("cookies set")).collect();
+        assert_eq!(
+            cookies,
+            [
+                "cookies set token a%2Bb --url http://localhost:4000 --path / --httpOnly --sameSite Lax --expires 4102444800",
+                "cookies set for_the_session x --url http://localhost:4000 --path / --sameSite None",
+            ]
+        );
+        let set = browser.commands.iter().position(|c| c.starts_with("cookies set")).unwrap();
+        let opened = browser.commands.iter().position(|c| c == "open http://localhost:4000/app/").unwrap();
+        assert!(set < opened);
     }
 
     #[test]

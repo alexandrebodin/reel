@@ -12,7 +12,7 @@ pub struct Script {
     pub size: [u32; 2],
     #[serde(default = "default_fps")]
     pub fps: u32,
-    /// agent-browser state file (cookies, storage) for a signed-in session.
+    /// agent-browser state file whose live cookies sign the browser in. Only its cookies are used.
     #[serde(default)]
     pub state: Option<PathBuf>,
     /// Steps run before recording starts: navigation, sign-in, dismissing banners.
