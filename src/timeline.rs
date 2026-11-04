@@ -86,6 +86,9 @@ pub const UNZOOM_MS: f64 = 600.0;
 pub const CURSOR_ARRIVES_EARLY_MS: f64 = 120.0;
 pub const MIN_SPEED: f64 = 0.25;
 pub const MAX_SPEED: f64 = 16.0;
+const MIN_CALM_ZOOM_MS: f64 = 1_500.0;
+const MIN_WIDE_MS: f64 = 3_000.0;
+const SAME_AREA_SHARE: f64 = 0.7;
 const FOCUS_FOLLOWS_MS: f64 = 800.0;
 const FIT_MARGIN: f64 = 1.25;
 const VIEW_MARGIN: f64 = 24.0;
@@ -278,12 +281,12 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         }
         let next = actions.get(i + 1).copied();
         action_end = event.until_ms();
-        free_from = attention_end(event, next, &pauses);
+        free_from = attention_end(event, next, &pauses, cuts);
 
         if let Some(rect) = event.camera_frame() {
             let view = focus_view(rect, frame, style.zoom.level);
             let wanted = camera.shown == wide || !in_view(camera.shown, rect);
-            if wanted && !focus_follows(event, next) && stays_long_enough(event.at_ms(), view, next, free_from) {
+            if wanted && worth_zooming(event, free_from, style) && !focus_follows(event, next) && stays_long_enough(event.at_ms(), view, next, free_from) {
                 camera.move_to(event.at_ms(), ZOOM_IN_MS, view);
             }
         }
@@ -291,7 +294,35 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
     if camera.shown != wide {
         camera.move_to((free_from + HOLD_MS).min(duration_ms - UNZOOM_MS - LAST_FRAME_MS), UNZOOM_MS, wide);
     }
-    (camera.zooms, moves)
+    let zooms = if style.zoom.calm { calmed(camera.zooms, frame, cuts) } else { camera.zooms };
+    (zooms, moves)
+}
+
+/// In a calm take a plain click is not worth a camera move: only typing, something that opened,
+/// or a click followed by a pause to read what it did.
+fn worth_zooming(event: &Event, attention_end_ms: f64, style: &Style) -> bool {
+    !style.zoom.calm || !matches!(event, Event::Click { .. }) || attention_end_ms > event.until_ms()
+}
+
+/// Drops zooms too short to read, and joins zooms on the same area that a quick trip back to the
+/// whole frame would separate.
+fn calmed(zooms: Vec<ZoomSpan>, frame: Size, cuts: &[Cut]) -> Vec<ZoomSpan> {
+    let mut kept: Vec<ZoomSpan> = Vec::new();
+    for zoom in zooms.into_iter().filter(|z| played_ms(z.start_ms, z.end_ms, cuts) >= MIN_CALM_ZOOM_MS) {
+        match kept.last_mut() {
+            Some(last) if played_ms(last.end_ms, zoom.start_ms, cuts) < MIN_WIDE_MS && same_area(last, &zoom, frame) => last.end_ms = zoom.end_ms,
+            _ => kept.push(zoom),
+        }
+    }
+    kept
+}
+
+/// Whether what the second zoom shows is already mostly in the first's view.
+fn same_area(a: &ZoomSpan, b: &ZoomSpan, frame: Size) -> bool {
+    let (va, vb) = (a.view(frame), b.view(frame));
+    let overlap_w = (va.x + va.w).min(vb.x + vb.w) - va.x.max(vb.x);
+    let overlap_h = (va.y + va.h).min(vb.y + vb.h) - va.y.max(vb.y);
+    overlap_w > 0.0 && overlap_h > 0.0 && overlap_w * overlap_h >= SAME_AREA_SHARE * vb.w * vb.h
 }
 
 /// How long a stretch of the take lasts once the cuts are out of it.
@@ -336,12 +367,12 @@ fn pauses(events: &[Event]) -> Vec<(f64, f64)> {
 
 /// When the viewer stops looking at an action: a scripted pause right after it is reading time.
 /// A pause after the next action belongs to that action.
-fn attention_end(event: &Event, next: Option<&Event>, pauses: &[(f64, f64)]) -> f64 {
+fn attention_end(event: &Event, next: Option<&Event>, pauses: &[(f64, f64)], cuts: &[Cut]) -> f64 {
     let next_ms = next.map_or(f64::INFINITY, Event::at_ms);
     pauses
         .iter()
         .filter(|(start, _)| *start >= event.at_ms() && *start < next_ms)
-        .fold(event.until_ms(), |end, (start, until)| if start - end <= CLUSTER_GAP_MS { end.max(*until) } else { end })
+        .fold(event.until_ms(), |end, (start, until)| if played_ms(end, *start, cuts) <= CLUSTER_GAP_MS { end.max(*until) } else { end })
 }
 
 /// Idle stretches play fast or are cut, typing plays faster.
@@ -409,6 +440,75 @@ mod tests {
 
     fn with_speeds(speeds: Vec<SpeedSpan>) -> Result<Timeline> {
         Timeline { speeds, ..Timeline::default() }.validated(10_000.0)
+    }
+
+    fn calm_style() -> Style {
+        let mut style = Style::default();
+        style.zoom.calm = true;
+        style
+    }
+
+    const FRAME_1080: Size = Size { w: 1920.0, h: 1080.0 };
+    const SPOT: Rect = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
+
+    fn click_at(at_ms: f64, target: Rect) -> Event {
+        Event::Click { at_ms, target, frame: target, pointer: Pointer::Arrow }
+    }
+
+    fn calm_zooms(events: &[Event], cuts: &[Cut]) -> Vec<ZoomSpan> {
+        Timeline::auto_around_cuts(events, 30_000.0, FRAME_1080, &calm_style(), cuts).zooms
+    }
+
+    #[test]
+    fn does_not_zoom_on_a_plain_click_in_a_calm_take() {
+        assert_eq!(calm_zooms(&[click_at(2_000.0, SPOT)], &[]), []);
+        assert_eq!(Timeline::auto(&[click_at(2_000.0, SPOT)], 30_000.0, FRAME_1080, &Style::default()).zooms.len(), 1, "the default look changed");
+    }
+
+    #[test]
+    fn zooms_in_a_calm_take_on_a_click_followed_by_a_pause_and_on_typing_and_dialogs() {
+        let pause = Event::Pause { at_ms: 2_500.0, until_ms: 5_000.0 };
+        assert_eq!(calm_zooms(&[click_at(2_000.0, SPOT), pause], &[]).len(), 1);
+        let typing = Event::Type { at_ms: 2_000.0, until_ms: 4_000.0, target: SPOT, frame: SPOT, pointer: Pointer::Text };
+        assert_eq!(calm_zooms(&[typing], &[]).len(), 1);
+        assert_eq!(calm_zooms(&[Event::Focus { at_ms: 2_000.0, frame: SPOT }], &[]).len(), 1);
+    }
+
+    #[test]
+    fn reads_a_pause_after_a_long_cut_wait_as_belonging_to_the_click() {
+        let events = [click_at(2_000.0, SPOT), Event::Pause { at_ms: 25_000.0, until_ms: 27_000.0 }];
+
+        assert_eq!(calm_zooms(&events, &[]), [], "the pause is too far away to belong to the click");
+        assert_eq!(calm_zooms(&events, &[cut(3_000.0, 24_500.0)]).len(), 1);
+    }
+
+    fn span(start_ms: f64, end_ms: f64, x: f64) -> ZoomSpan {
+        ZoomSpan { start_ms, end_ms, x, y: 540.0, level: 1.4 }
+    }
+
+    #[test]
+    fn joins_nearby_zooms_on_the_same_area_only() {
+        let joined = calmed(vec![span(1_000.0, 4_000.0, 960.0), span(6_000.0, 9_000.0, 1_000.0)], FRAME_1080, &[]);
+        assert_eq!(joined, [span(1_000.0, 9_000.0, 960.0)]);
+
+        let far_in_time = vec![span(1_000.0, 4_000.0, 960.0), span(7_000.0, 9_000.0, 1_000.0)];
+        assert_eq!(calmed(far_in_time.clone(), FRAME_1080, &[]), far_in_time);
+
+        let elsewhere = vec![span(1_000.0, 4_000.0, 200.0), span(6_000.0, 9_000.0, 1_700.0)];
+        assert_eq!(calmed(elsewhere.clone(), FRAME_1080, &[]), elsewhere);
+    }
+
+    #[test]
+    fn judges_the_time_between_zooms_as_it_plays() {
+        let apart = vec![span(1_000.0, 4_000.0, 960.0), span(9_000.0, 12_000.0, 960.0)];
+
+        assert_eq!(calmed(apart, FRAME_1080, &[cut(4_500.0, 8_500.0)]).len(), 1);
+    }
+
+    #[test]
+    fn drops_a_zoom_too_short_to_read() {
+        assert_eq!(calmed(vec![span(1_000.0, 2_499.0, 960.0)], FRAME_1080, &[]), []);
+        assert_eq!(calmed(vec![span(1_000.0, 2_500.0, 960.0)], FRAME_1080, &[]).len(), 1);
     }
 
     #[test]

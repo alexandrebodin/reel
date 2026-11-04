@@ -430,7 +430,7 @@ struct Control {
 
 /// The background half of `start`: captures until told to stop. It alone writes the take's state.
 pub fn serve(session: &str, style_overrides: &[String], state: Option<PathBuf>) -> Result<()> {
-    let style = Style::default().overridden(style_overrides)?;
+    let style = live_defaults().overridden(style_overrides)?;
     let mut browser = AgentBrowser::new(session, 2);
     let page = browser.run(&["eval", "JSON.stringify({ w: innerWidth, h: innerHeight, scale: devicePixelRatio, url: location.href })"], None).with_context(|| format!("session {session} has no browser: run reel rec open --session {session} <url> first"))?;
     let page: Value = serde_json::from_str(page["result"].as_str().context("reading the page")?)?;
@@ -509,6 +509,13 @@ pub fn serve(session: &str, style_overrides: &[String], state: Option<PathBuf>) 
     }
     let _ = fs::remove_file(control_path(session));
     Ok(())
+}
+
+/// A live take is busier than a script, so it starts from a calmer camera.
+fn live_defaults() -> Style {
+    let mut style = Style::default();
+    style.zoom.calm = true;
+    style
 }
 
 fn finish_take(take: &Take, dir: &Path, video: &Path, url: &str, size: [u32; 2], style: Style, state: Option<&Path>) -> Result<Value> {
@@ -772,6 +779,12 @@ mod tests {
         let mut bad = ClosingBrowser { failures: 99, tries: 0, error: "net::ERR_NAME_NOT_RESOLVED" };
         assert!(open_page(&mut bad, "http://x").is_err());
         assert_eq!(bad.tries, 1);
+    }
+
+    #[test]
+    fn starts_a_live_take_with_a_calm_camera_that_can_be_turned_off() {
+        assert!(live_defaults().zoom.calm);
+        assert!(!live_defaults().overridden(&["zoom.calm=false".to_string()]).unwrap().zoom.calm);
     }
 
     #[test]

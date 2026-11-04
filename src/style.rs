@@ -248,11 +248,14 @@ pub struct Zoom {
     /// The furthest the camera goes in: 1 never zooms.
     pub level: f64,
     pub animation: ZoomAnimation,
+    /// Zooms only for what needs reading and stays put between nearby ones. Suits a live take,
+    /// where constant zooming on top of the app's own dialogs reads as flashing.
+    pub calm: bool,
 }
 
 impl Default for Zoom {
     fn default() -> Zoom {
-        Zoom { level: 1.4, animation: ZoomAnimation::Smooth }
+        Zoom { level: 1.4, animation: ZoomAnimation::Smooth, calm: false }
     }
 }
 

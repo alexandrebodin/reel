@@ -16,7 +16,7 @@ export type Timeline = {
 }
 
 export type Style = {
-  zoom: { level: number; animation: "smooth" | "dynamic" }
+  zoom: { level: number; animation: "smooth" | "dynamic"; calm: boolean }
   background: { fill: string; aspect: string; padding: number; shadow: number; corners: number }
   cursor: {
     show: boolean

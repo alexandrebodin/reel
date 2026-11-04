@@ -199,6 +199,7 @@ export function Inspector() {
             <FieldGroup className="gap-4">
               <SliderRow label="Automatic zoom" value={style.zoom.level} min={1} max={4} step={0.05} format={times} disabled={edited && !project.imported} onChange={(level) => update((s) => ({ ...s, zoom: { ...s.zoom, level } }), true)} />
               {edited && <FieldDescription>{project.imported ? "Takes effect when you reset to automatic." : "This timeline is edited. Select a zoom to change it, or reset to automatic."}</FieldDescription>}
+              {!edited && <SwitchRow label="Calm camera" checked={style.zoom.calm} onChange={(calm) => update((s) => ({ ...s, zoom: { ...s.zoom, calm } }))} />}
               <ChoiceRow label="Zoom motion" value={style.zoom.animation} options={[["smooth", "Smooth"], ["dynamic", "Dynamic"]]} onChange={(animation) => update((s) => ({ ...s, zoom: { ...s.zoom, animation } }))} />
               <ChoiceRow label="Motion blur" value={style.motion_blur} options={[["off", "Off"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]]} onChange={(motion_blur) => update((s) => ({ ...s, motion_blur }))} />
             </FieldGroup>

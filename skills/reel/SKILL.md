@@ -99,6 +99,7 @@ Pass them to `reel rec start` or `reel --render` as `--style key=value`, repeate
 | --- | --- |
 | `zoom.level` | 1 to 8, default 1.4. 1 never zooms |
 | `zoom.animation` | `smooth`, `dynamic` |
+| `zoom.calm` | `true`, the default for `rec`, zooms only for typing, dialogs and clicks you `hold` after. `false` zooms on every click |
 | `motion_blur` | `off`, `low`, `medium`, `high`. Makes a render about 3 times slower or more |
 | `cursor.show`, `cursor.adaptive`, `cursor.hide_when_idle`, `cursor.hide_when_typing` | `true`, `false` |
 | `cursor.size` | 0.25 to 8 |
