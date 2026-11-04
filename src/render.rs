@@ -132,6 +132,9 @@ impl Compositor {
         let Some(cursor) = cursor.filter(|c| self.style.cursor.show && c.opacity > 0.0) else { return };
         let scale = self.inner.width() / view.w as f32;
         let (x, y) = (self.inner.x() + (cursor.x - view.x) as f32 * scale, self.inner.y() + (cursor.y - view.y) as f32 * scale);
+        if !(self.inner.left()..=self.inner.right()).contains(&x) || !(self.inner.top()..=self.inner.bottom()).contains(&y) {
+            return;
+        }
         let size = CURSOR_SIZE / 20.0 * self.density * (scale / self.density).powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * cursor.pressed as f32);
         self.draw_cursor(out, x - left, y - top, size, cursor.opacity as f32, cursor.pointer);
     }
@@ -845,6 +848,19 @@ mod tests {
         let over_a_link = cursor_frame(dot, Cursor { pointer: Pointer::Hand, ..SPOT });
 
         assert_eq!(plain.data(), over_a_link.data());
+    }
+
+    #[test]
+    fn leaves_out_a_cursor_the_camera_has_left_behind() {
+        let mut style = flat(GREEN);
+        style.background.padding = 20.0;
+        let c = compositor([200, 100], 1, &style);
+        let right_half = View { x: 100.0, y: 25.0, w: 100.0, h: 50.0 };
+        let behind = Cursor { x: 85.0, y: 50.0, ..SPOT };
+
+        let with_cursor = c.compose(&white_frame(), right_half, Some(behind), &[]);
+
+        assert_eq!(with_cursor.data(), c.compose(&white_frame(), right_half, None, &[]).data());
     }
 
     #[test]
