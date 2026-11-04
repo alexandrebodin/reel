@@ -65,7 +65,8 @@ impl Script {
         }
         script.state = script.state.map(|state| base.join(state));
         if let Fill::Image(image) = &mut script.style.background.fill {
-            *image = base.join(&*image);
+            let path = base.join(&*image);
+            *image = path.canonicalize().with_context(|| format!("background image {} not found", path.display()))?;
         }
         script.style = script.style.validated().with_context(|| format!("reading the style of {}", path.display()))?;
         Ok(script)
@@ -122,6 +123,21 @@ mod tests {
         let script: Script = serde_json::from_str(r#"{ "url": "about:blank", "style": { "zoom": { "level": 1.2 } }, "steps": [] }"#).unwrap();
 
         assert_eq!(script.style.zoom.level, 1.2);
+    }
+
+    #[test]
+    fn resolves_a_background_image_next_to_the_script_and_rejects_a_missing_one() {
+        let dir = std::env::temp_dir().join(format!("reel-script-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wall.png"), "").unwrap();
+        let demo = |image: &str| format!(r#"{{ "url": "about:blank", "style": {{ "background": {{ "fill": "{image}" }} }}, "steps": [] }}"#);
+        std::fs::write(dir.join("found.json"), demo("wall.png")).unwrap();
+        std::fs::write(dir.join("missing.json"), demo("gone.png")).unwrap();
+
+        let script = Script::load(&dir.join("found.json")).unwrap();
+
+        assert_eq!(script.style.background.fill, Fill::Image(dir.canonicalize().unwrap().join("wall.png")));
+        assert!(format!("{:#}", Script::load(&dir.join("missing.json")).unwrap_err()).contains("gone.png"));
     }
 
     #[test]

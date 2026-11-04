@@ -1,0 +1,67 @@
+{
+  "url": "page.html",
+  "style": {
+    "zoom": {
+      "level": 2,
+      "animation": "smooth"
+    },
+    "motion_blur": "medium",
+    "cursor": {
+      "show": true,
+      "size": 2,
+      "style": "white_arrow",
+      "motion": "natural",
+      "hide_when_idle": false,
+      "hide_when_typing": true,
+      "adaptive": true
+    },
+    "clicks": {
+      "press": true,
+      "ripple": true,
+      "color": "blue",
+      "style": "filled"
+    },
+    "background": {
+      "fill": "#2d1b69,#e2581f",
+      "aspect": "auto",
+      "padding": 12,
+      "shadow": 50,
+      "corners": 5
+    }
+  },
+  "steps": [
+    {
+      "do": "pause",
+      "ms": 800
+    },
+    {
+      "do": "click",
+      "target": "text=Add domain"
+    },
+    {
+      "do": "type",
+      "target": "#hostname",
+      "text": "shop.acme.com"
+    },
+    {
+      "do": "click",
+      "target": "text=Add"
+    },
+    {
+      "do": "wait_for",
+      "target": "#verified"
+    },
+    {
+      "do": "pause",
+      "ms": 1200
+    },
+    {
+      "do": "click",
+      "target": "text=Verify"
+    },
+    {
+      "do": "pause",
+      "ms": 1500
+    }
+  ]
+}
