@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::capture::{AgentBrowser, Browser, Recording, OVERLAY_JS};
+use crate::capture::{sign_in, AgentBrowser, Browser, Recording, OVERLAY_JS};
 use crate::events::{Event, Pointer, Rect};
 use crate::render::{plan_for, render, video_duration_ms};
 use crate::screencast::{PageListener, Screencast};
@@ -307,9 +307,12 @@ fn check_session(session: &str) -> Result<()> {
 }
 
 /// Starts the browser at 2x for a session, ready to sign in or rehearse before recording.
-pub fn open(session: &str, url: &str, size: [u32; 2]) -> Result<()> {
+pub fn open(session: &str, url: &str, size: [u32; 2], state: Option<&Path>) -> Result<()> {
     check_session(session)?;
     let mut browser = AgentBrowser::new(session, 2);
+    if let Some(state) = state {
+        sign_in(&mut browser, state, url)?;
+    }
     open_page(&mut browser, url)?;
     browser.run(&["set", "viewport", &size[0].to_string(), &size[1].to_string(), "2"], None)?;
     let scale = browser.run(&["eval", "window.devicePixelRatio"], None)?;

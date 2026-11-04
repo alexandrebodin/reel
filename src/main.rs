@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: reel <demo.json> [out.mp4] [--style key=value]...\n       reel --render <recording.json> [out.mp4] [--style key=value]...\n       reel edit <recording.json | video> [--no-open] [--browser]\n       reel rec open --session <name> <url> [--size WxH]\n       reel rec start --session <name> [--state <file>] [--style key=value]...\n       reel rec type --session <name> <selector> <text>\n       reel rec hold --session <name> <ms>\n       reel rec cut --session <name> [--last <n>]\n       reel rec stop --session <name> [--no-render]";
+const USAGE: &str = "usage: reel <demo.json> [out.mp4] [--style key=value]...\n       reel --render <recording.json> [out.mp4] [--style key=value]...\n       reel edit <recording.json | video> [--no-open] [--browser]\n       reel rec open --session <name> <url> [--size WxH] [--state <file>]\n       reel rec start --session <name> [--state <file>] [--style key=value]...\n       reel rec type --session <name> <selector> <text>\n       reel rec hold --session <name> <ms>\n       reel rec cut --session <name> [--last <n>]\n       reel rec stop --session <name> [--no-render]";
 
 fn main() {
     let (positional, style) = split_style_flags(std::env::args().skip(1).collect());
@@ -59,8 +59,9 @@ fn rec(args: &[String], style: &[String]) -> anyhow::Result<()> {
     match verb.as_str() {
         "open" => {
             let size = take_flag(&mut args, "--size").map_or(Ok([1920, 1080]), |s| parse_size(&s)).map_err(|e| anyhow!(e))?;
+            let state = take_flag(&mut args, "--state").map(PathBuf::from);
             let url = args.first().context("which address?")?;
-            recorder::open(&session, url, size)?;
+            recorder::open(&session, url, size, state.as_deref())?;
         }
         "start" => {
             let state = take_flag(&mut args, "--state").map(PathBuf::from);

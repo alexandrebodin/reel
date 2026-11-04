@@ -22,7 +22,7 @@ reel rec open --session domains http://localhost:3000/domains
 
 Always open with `reel rec open`, not `agent-browser open`: it starts the browser at 2x, without which the video is blurry. Add `--size 1280x720` for another size; 1920x1080 is the default.
 
-Sign in now if needed. Nothing is recorded yet. Then walk the flow once with `agent-browser --session domains ...` to learn the page and spot surprises. Finally put the app back where the demo starts: undo what the rehearsal created, and go back to the first page.
+Sign in now if needed, or start signed in with `--state auth.json`, a file from `agent-browser state save`. Only its cookies are used. Nothing is recorded yet. Then walk the flow once with `agent-browser --session domains ...` to learn the page and spot surprises. Finally put the app back where the demo starts: undo what the rehearsal created, and go back to the first page.
 
 ### 2. Record
 

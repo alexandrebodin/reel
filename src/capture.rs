@@ -239,7 +239,7 @@ struct StateCookie {
 
 /// Sets the state file's live cookies itself: agent-browser's --state dropped Studio's session
 /// cookie. Scoping them to the demo's origin also lets a state saved on another port work.
-fn sign_in(browser: &mut dyn Browser, state: &Path, url: &str) -> Result<()> {
+pub fn sign_in(browser: &mut dyn Browser, state: &Path, url: &str) -> Result<()> {
     let text = std::fs::read_to_string(state).with_context(|| format!("reading {}", state.display()))?;
     let state: BrowserState = serde_json::from_str(&text).context("parsing the state file")?;
     let origin = origin_of(url);
