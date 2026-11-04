@@ -63,7 +63,7 @@ pub struct Pacing {
 impl Default for Pacing {
     fn default() -> Pacing {
         Pacing {
-            between_actions: Duration::from_millis(900),
+            between_actions: Duration::from_millis(1_300),
             between_keys: Duration::from_millis(45),
             settle: Duration::from_millis(1_000),
             after_click: Duration::from_millis(350),

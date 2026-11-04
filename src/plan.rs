@@ -1,6 +1,6 @@
 use crate::events::{Event, Rect};
 
-pub const MAX_ZOOM: f64 = 1.8;
+pub const MAX_ZOOM: f64 = 1.4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -43,14 +43,15 @@ pub struct Ripple {
     pub progress: f64,
 }
 
-const ZOOM_IN_LEAD_MS: f64 = 900.0;
-const SETTLE_MS: f64 = 150.0;
-const FOCUS_PAN_MS: f64 = 600.0;
+const ZOOM_IN_MS: f64 = 700.0;
+const FOCUS_FOLLOWS_MS: f64 = 800.0;
 const FIT_MARGIN: f64 = 1.25;
-const PAN_LEAD_MS: f64 = 650.0;
+const VIEW_MARGIN: f64 = 24.0;
 const HOLD_MS: f64 = 1_200.0;
-const ZOOM_OUT_MS: f64 = 1_000.0;
+const UNZOOM_MS: f64 = 600.0;
+const MIN_ZOOM_STAY_MS: f64 = 700.0;
 const CLUSTER_GAP_MS: f64 = 2_500.0;
+const LAST_FRAME_MS: f64 = 200.0;
 const CURSOR_TRAVEL_MS: f64 = 650.0;
 const CURSOR_ARRIVES_EARLY_MS: f64 = 120.0;
 const PRESS_LEAD_MS: f64 = 60.0;
@@ -63,7 +64,6 @@ const MIN_IDLE_SPEED: f64 = 3.0;
 const MAX_IDLE_SPEED: f64 = 12.0;
 const TYPING_SPEED: f64 = 2.0;
 const MIN_FAST_TYPING_MS: f64 = 1_500.0;
-const MAX_PULL_BACK: f64 = 0.35;
 
 pub struct Plan {
     pub frame: Size,
@@ -83,17 +83,14 @@ struct Move {
 
 impl Plan {
     pub fn new(events: &[Event], duration_ms: f64, frame: Size) -> Plan {
-        let mut focus: Vec<(&Event, Rect)> = events.iter().filter_map(|e| e.camera_frame().map(|r| (e, r))).collect();
-        focus.sort_by(|a, b| a.0.at_ms().total_cmp(&b.0.at_ms()));
-        let mut cursor: Vec<(&Event, Rect)> = events.iter().filter_map(|e| e.cursor_target().map(|r| (e, r))).collect();
-        cursor.sort_by(|a, b| a.0.at_ms().total_cmp(&b.0.at_ms()));
         let cursor_start = (frame.w * 0.62, frame.h * 0.72);
+        let (camera, moves) = choreograph(events, duration_ms, cursor_start, frame);
         Plan {
             frame,
             time: TimeMap::new(events, duration_ms),
-            camera: camera_keys(&focus, &pauses(events), frame),
+            camera,
             cursor_start,
-            moves: cursor_moves(&cursor, cursor_start),
+            moves,
             clicks: events
                 .iter()
                 .filter_map(|e| match e {
@@ -116,7 +113,7 @@ impl Plan {
                     return to;
                 }
                 let p = (t_ms - t0) / (t1 - t0);
-                return pull_back(lerp_view(from, to, ease_in_out(p)), from, to, p, self.frame);
+                return lerp_view(from, to, ease_in_out(p));
             }
         }
         self.camera[self.camera.len() - 1].1
@@ -158,35 +155,88 @@ fn focus_view(target: Rect, frame: Size) -> View {
     View { x: (cx - w / 2.0).clamp(0.0, frame.w - w), y: (cy - h / 2.0).clamp(0.0, frame.h - h), w, h }
 }
 
-fn camera_keys(focus: &[(&Event, Rect)], pauses: &[(f64, f64)], frame: Size) -> Vec<(f64, View)> {
-    let mut keys = vec![(0.0, overview(frame))];
-    for cluster in clusters(focus, pauses) {
-        let (first, first_target) = cluster[0];
-        let current = keys[keys.len() - 1].1;
-        let (start_ms, settled_ms) = move_window(first, ZOOM_IN_LEAD_MS);
-        push_key(&mut keys, start_ms, current);
-        push_key(&mut keys, settled_ms, focus_view(first_target, frame));
-        for pair in cluster.windows(2) {
-            let ((_, previous), (next, next_target)) = (pair[0], pair[1]);
-            let (start_ms, settled_ms) = move_window(next, PAN_LEAD_MS);
-            push_key(&mut keys, start_ms, focus_view(previous, frame));
-            push_key(&mut keys, settled_ms, focus_view(next_target, frame));
-        }
-        let (last, last_target) = cluster[cluster.len() - 1];
-        let end_ms = attention_end(last, pauses);
-        push_key(&mut keys, end_ms + HOLD_MS, focus_view(last_target, frame));
-        push_key(&mut keys, end_ms + HOLD_MS + ZOOM_OUT_MS, overview(frame));
-    }
-    keys
+fn in_view(view: View, rect: Rect) -> bool {
+    rect.x >= view.x + VIEW_MARGIN
+        && rect.y >= view.y + VIEW_MARGIN
+        && rect.x + rect.w <= view.x + view.w - VIEW_MARGIN
+        && rect.y + rect.h <= view.y + view.h - VIEW_MARGIN
 }
 
-/// The camera anticipates an action, so it is there when the click lands, but only reacts to
-/// something that appeared: it cannot know before the dialog is on screen.
-fn move_window(event: &Event, lead_ms: f64) -> (f64, f64) {
-    match event {
-        Event::Focus { at_ms, .. } => (*at_ms, at_ms + FOCUS_PAN_MS),
-        _ => (event.at_ms() - lead_ms, event.at_ms() - SETTLE_MS),
+struct Camera {
+    keys: Vec<(f64, View)>,
+    shown: View,
+}
+
+impl Camera {
+    /// Moves to `view` from `start_ms` on, and returns when it gets there.
+    fn move_to(&mut self, start_ms: f64, length_ms: f64, view: View) -> f64 {
+        let start_ms = start_ms.max(self.keys[self.keys.len() - 1].0);
+        self.keys.push((start_ms, self.shown));
+        self.keys.push((start_ms + length_ms, view));
+        self.shown = view;
+        start_ms + length_ms
     }
+}
+
+/// Decides the camera and the cursor together, because one rule ties them: the cursor only travels
+/// through what the viewer can see, so a target out of view means zooming out first. The camera
+/// comes back in once the click has landed, and stays still for anything already in view.
+fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), frame: Size) -> (Vec<(f64, View)>, Vec<Move>) {
+    let pauses = pauses(events);
+    let mut actions: Vec<&Event> = events.iter().filter(|e| e.camera_frame().is_some()).collect();
+    actions.sort_by(|a, b| a.at_ms().total_cmp(&b.at_ms()));
+
+    let wide = overview(frame);
+    let mut camera = Camera { keys: vec![(0.0, wide)], shown: wide };
+    let mut moves = Vec::new();
+    let (mut position, mut free_from) = (cursor_start, 0.0);
+    for (i, event) in actions.iter().enumerate() {
+        let arrive_ms = event.at_ms() - CURSOR_ARRIVES_EARLY_MS;
+        let mut travel_ms = (arrive_ms - CURSOR_TRAVEL_MS).max(free_from);
+        let target_hidden = event.cursor_target().is_some_and(|t| !in_view(camera.shown, t));
+        if camera.shown != wide && (target_hidden || event.at_ms() - free_from > CLUSTER_GAP_MS) {
+            let start_ms = (free_from + HOLD_MS).min(travel_ms - UNZOOM_MS).max(free_from);
+            travel_ms = travel_ms.max(camera.move_to(start_ms, UNZOOM_MS, wide));
+        }
+        if let Some(target) = event.cursor_target() {
+            let to = target.center();
+            if travel_ms < arrive_ms && position != to {
+                moves.push(Move { start_ms: travel_ms, end_ms: arrive_ms, from: position, to });
+            }
+            position = to;
+        }
+        free_from = attention_end(event, &pauses);
+
+        let next = actions.get(i + 1).copied();
+        if let Some(rect) = event.camera_frame() {
+            let view = focus_view(rect, frame);
+            let wanted = camera.shown == wide || !in_view(camera.shown, rect);
+            if wanted && !focus_follows(event, next) && stays_long_enough(event.at_ms(), view, next, free_from) {
+                camera.move_to(event.at_ms(), ZOOM_IN_MS, view);
+            }
+        }
+    }
+    if camera.shown != wide {
+        camera.move_to((free_from + HOLD_MS).min(duration_ms - UNZOOM_MS - LAST_FRAME_MS), UNZOOM_MS, wide);
+    }
+    (camera.keys, moves)
+}
+
+/// What a click opened is the thing to look at, so the camera waits for it.
+fn focus_follows(event: &Event, next: Option<&Event>) -> bool {
+    matches!(next, Some(Event::Focus { at_ms, .. }) if at_ms - event.at_ms() <= FOCUS_FOLLOWS_MS)
+}
+
+/// A zoom that has to undo itself straight away for the next target is only noise.
+fn stays_long_enough(at_ms: f64, view: View, next: Option<&Event>, free_from: f64) -> bool {
+    let Some(next) = next else {
+        return true;
+    };
+    if next.cursor_target().is_none_or(|t| in_view(view, t)) {
+        return true;
+    }
+    let unzoom_ms = (next.at_ms() - CURSOR_ARRIVES_EARLY_MS - CURSOR_TRAVEL_MS - UNZOOM_MS).max(free_from);
+    unzoom_ms - (at_ms + ZOOM_IN_MS) >= MIN_ZOOM_STAY_MS
 }
 
 fn pauses(events: &[Event]) -> Vec<(f64, f64)> {
@@ -207,40 +257,6 @@ fn attention_end(event: &Event, pauses: &[(f64, f64)]) -> f64 {
         .iter()
         .filter(|(start, _)| *start >= event.at_ms())
         .fold(event.until_ms(), |end, (start, until)| if start - end <= CLUSTER_GAP_MS { end.max(*until) } else { end })
-}
-
-fn clusters<'a>(focus: &'a [(&'a Event, Rect)], pauses: &[(f64, f64)]) -> Vec<&'a [(&'a Event, Rect)]> {
-    let mut clusters = Vec::new();
-    let mut start = 0;
-    for i in 1..=focus.len() {
-        let ends = i == focus.len() || focus[i].0.at_ms() - attention_end(focus[i - 1].0, pauses) > CLUSTER_GAP_MS;
-        if ends {
-            clusters.push(&focus[start..i]);
-            start = i;
-        }
-    }
-    clusters.into_iter().filter(|c| !c.is_empty()).collect()
-}
-
-fn push_key(keys: &mut Vec<(f64, View)>, t_ms: f64, view: View) {
-    let t_ms = t_ms.max(keys[keys.len() - 1].0);
-    keys.push((t_ms, view));
-}
-
-fn cursor_moves(focus: &[(&Event, Rect)], start: (f64, f64)) -> Vec<Move> {
-    let mut moves = Vec::new();
-    let (mut position, mut free_from) = (start, 0.0);
-    for (event, target) in focus {
-        let to = target.center();
-        let end_ms = event.at_ms() - CURSOR_ARRIVES_EARLY_MS;
-        let start_ms = (end_ms - CURSOR_TRAVEL_MS).max(free_from);
-        if start_ms < end_ms && position != to {
-            moves.push(Move { start_ms, end_ms, from: position, to });
-        }
-        position = to;
-        free_from = event.until_ms();
-    }
-    moves
 }
 
 fn press_amount(since_click_ms: f64) -> f64 {
@@ -268,19 +284,6 @@ fn ease_in_out(p: f64) -> f64 {
 fn lerp_view(a: View, b: View, p: f64) -> View {
     let mix = |x: f64, y: f64| x + (y - x) * p;
     View { x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h) }
-}
-
-/// A long pan widens the view on the way, so the viewer keeps their bearings.
-fn pull_back(view: View, from: View, to: View, p: f64, frame: Size) -> View {
-    let ((ax, ay), (bx, by)) = (from.center(), to.center());
-    let travel = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt() / from.w.max(to.w);
-    let depth = ((travel - 0.5) * 0.6).clamp(0.0, MAX_PULL_BACK) * (std::f64::consts::PI * p).sin();
-    if depth <= 0.0 {
-        return view;
-    }
-    let (w, h) = ((view.w / (1.0 - depth)).min(frame.w), (view.h / (1.0 - depth)).min(frame.h));
-    let (cx, cy) = view.center();
-    View { x: (cx - w / 2.0).clamp(0.0, frame.w - w), y: (cy - h / 2.0).clamp(0.0, frame.h - h), w, h }
 }
 
 /// A hand moves in a slight arc, not a straight line.
@@ -325,8 +328,11 @@ impl TimeMap {
         let mut busy: Vec<(f64, f64)> = events
             .iter()
             .map(|e| match e {
-                Event::Pause { at_ms, until_ms } => (*at_ms, *until_ms),
-                _ => (e.at_ms() - ZOOM_IN_LEAD_MS, e.until_ms() + HOLD_MS + ZOOM_OUT_MS),
+                Event::Pause { at_ms, until_ms } => (*at_ms, until_ms + HOLD_MS + UNZOOM_MS),
+                _ => (
+                    e.at_ms() - UNZOOM_MS - CURSOR_TRAVEL_MS - CURSOR_ARRIVES_EARLY_MS,
+                    e.until_ms() + ZOOM_IN_MS + HOLD_MS + UNZOOM_MS,
+                ),
             })
             .map(|(a, b)| (a.clamp(0.0, duration_ms), b.clamp(0.0, duration_ms)))
             .collect();
@@ -410,11 +416,11 @@ mod tests {
     }
 
     #[test]
-    fn zooms_onto_a_clicked_button() {
+    fn zooms_onto_a_clicked_button_once_the_click_lands() {
         let plan = Plan::new(&[click(2_000.0, BUTTON)], 6_000.0, FRAME);
 
-        let view = plan.camera_at(2_000.0);
-
+        assert_eq!(plan.camera_at(1_900.0).zoom(FRAME), 1.0, "zoomed in before the click");
+        let view = plan.camera_at(3_000.0);
         assert!(close(view.zoom(FRAME), MAX_ZOOM), "zoom was {}", view.zoom(FRAME));
         let (cx, cy) = view.center();
         assert!(close(cx, 950.0) && close(cy, 516.0), "centered on ({cx}, {cy})");
@@ -426,9 +432,9 @@ mod tests {
         let row = Rect { x: 704.0, y: 472.0, w: 768.0, h: 58.0 };
         let plan = Plan::new(&[Event::Click { at_ms: 2_000.0, target: menu_button, frame: row }], 6_000.0, FRAME);
 
-        let view = plan.camera_at(2_000.0);
+        let view = plan.camera_at(3_000.0);
 
-        assert!(view.zoom(FRAME) > 1.5);
+        assert!(view.zoom(FRAME) > 1.3);
         assert!(view.x <= row.x && view.x + view.w >= row.x + row.w, "row cut off by {view:?}");
         let (cx, _) = view.center();
         assert!(close(cx, 1_088.0), "centered on {cx}, not the row");
@@ -447,14 +453,13 @@ mod tests {
         assert!(view.y <= dialog.y && view.y + view.h >= dialog.y + dialog.h, "dialog cut off by {view:?}");
         assert!(view.x <= dialog.x && view.x + view.w >= dialog.x + dialog.w, "dialog cut off by {view:?}");
         assert!(close(plan.cursor_at(3_200.0).x, 950.0), "the cursor moved to the dialog");
-        let (cx, _) = plan.camera_at(2_100.0).center();
-        assert!(close(cx, 950.0), "the camera left the click before the dialog appeared");
+        assert_eq!(plan.camera_at(2_300.0).zoom(FRAME), 1.0, "the camera moved before the dialog appeared");
     }
 
     #[test]
     fn holds_the_view_through_a_scripted_pause() {
-        let other = Rect { x: 300.0, y: 200.0, w: 100.0, h: 32.0 };
-        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 7_100.0 }, click(8_000.0, other)];
+        let near = Rect { x: 600.0, y: 400.0, w: 100.0, h: 32.0 };
+        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 7_100.0 }, click(8_000.0, near)];
         let plan = Plan::new(&events, 14_000.0, FRAME);
 
         for t in [3_000.0, 5_000.0, 7_000.0] {
@@ -477,9 +482,9 @@ mod tests {
         let corner = Rect { x: 1880.0, y: 4.0, w: 32.0, h: 32.0 };
         let plan = Plan::new(&[click(2_000.0, corner)], 6_000.0, FRAME);
 
-        let view = plan.camera_at(2_000.0);
+        let view = plan.camera_at(3_000.0);
 
-        assert!(view.zoom(FRAME) > 1.5);
+        assert!(view.zoom(FRAME) > 1.3);
         assert!(view.x >= 0.0 && view.y >= 0.0);
         assert!(view.x + view.w <= FRAME.w + 0.01 && view.y + view.h <= FRAME.h + 0.01);
     }
@@ -493,15 +498,55 @@ mod tests {
     }
 
     #[test]
-    fn pans_between_close_actions_without_zooming_out() {
-        let other = Rect { x: 300.0, y: 200.0, w: 100.0, h: 32.0 };
-        let plan = Plan::new(&[click(2_000.0, BUTTON), click(3_200.0, other)], 8_000.0, FRAME);
+    fn ends_on_the_whole_frame_even_right_after_the_last_action() {
+        let plan = Plan::new(&[click(2_000.0, BUTTON)], 3_600.0, FRAME);
 
-        for t in [2_000.0, 2_600.0, 3_200.0] {
-            assert!(plan.camera_at(t).zoom(FRAME) > 1.5, "zoomed out at {t}");
+        assert_eq!(plan.camera_at(3_600.0).zoom(FRAME), 1.0);
+    }
+
+    #[test]
+    fn keeps_the_camera_still_while_the_cursor_moves_inside_the_view() {
+        let near = Rect { x: 600.0, y: 400.0, w: 100.0, h: 32.0 };
+        let plan = Plan::new(&[click(2_000.0, BUTTON), click(3_500.0, near)], 8_000.0, FRAME);
+
+        let settled = plan.camera_at(2_800.0);
+        for t in [3_000.0, 3_300.0, 3_500.0, 4_000.0] {
+            assert_eq!(plan.camera_at(t), settled, "the camera moved at {t}");
         }
-        let (cx, _) = plan.camera_at(3_200.0).center();
-        assert!(cx < 950.0, "still centered on the first button at {cx}");
+        assert!(close(plan.cursor_at(3_500.0).x, 650.0));
+    }
+
+    #[test]
+    fn zooms_out_before_the_cursor_travels_to_a_target_out_of_view() {
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 4_000.0 }, click(5_000.0, far)];
+        let plan = Plan::new(&events, 10_000.0, FRAME);
+
+        assert!(close(plan.camera_at(3_900.0).zoom(FRAME), MAX_ZOOM), "zoomed out during the pause");
+        let wide_from = (0..=500).map(|i| 4_000.0 + i as f64 * 10.0).find(|t| plan.camera_at(*t).zoom(FRAME) == 1.0);
+        let wide_from = wide_from.expect("never zoomed out before the click");
+        assert!(close(plan.cursor_at(wide_from - 10.0).x, 950.0), "the cursor left while still zoomed in");
+        assert!(plan.cursor_at(wide_from + 200.0).x < 950.0, "the cursor did not travel once zoomed out");
+        assert_eq!(plan.camera_at(5_000.0).zoom(FRAME), 1.0, "zoomed in before the click");
+        assert!(close(plan.camera_at(6_000.0).zoom(FRAME), MAX_ZOOM), "did not zoom onto the new target");
+    }
+
+    #[test]
+    fn zooms_out_after_a_long_gap_before_a_target_in_view() {
+        let near = Rect { x: 600.0, y: 400.0, w: 100.0, h: 32.0 };
+        let plan = Plan::new(&[click(2_000.0, BUTTON), click(9_000.0, near)], 14_000.0, FRAME);
+
+        assert_eq!(plan.camera_at(6_000.0).zoom(FRAME), 1.0);
+    }
+
+    #[test]
+    fn does_not_zoom_in_for_a_moment_when_the_next_target_is_out_of_view() {
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let plan = Plan::new(&[click(2_000.0, BUTTON), click(3_300.0, far)], 8_000.0, FRAME);
+
+        for t in [2_000.0, 2_400.0, 2_800.0, 3_300.0] {
+            assert_eq!(plan.camera_at(t).zoom(FRAME), 1.0, "zoomed in at {t}");
+        }
     }
 
     #[test]
@@ -561,21 +606,6 @@ mod tests {
         let plan = Plan::new(&events, 9_000.0, FRAME);
 
         assert!(close(plan.time.output_duration_ms(), 9_000.0));
-    }
-
-    #[test]
-    fn pulls_back_mid_way_through_a_pan_across_the_screen() {
-        let top_right = Rect { x: 1780.0, y: 10.0, w: 120.0, h: 36.0 };
-        let bottom_left = Rect { x: 80.0, y: 1000.0, w: 120.0, h: 36.0 };
-        let plan = Plan::new(&[click(2_000.0, top_right), click(3_200.0, bottom_left)], 8_000.0, FRAME);
-
-        let start = plan.camera_at(2_550.0).zoom(FRAME);
-        let middle = plan.camera_at(2_800.0).zoom(FRAME);
-        let end = plan.camera_at(3_050.0).zoom(FRAME);
-
-        assert!(middle < start - 0.2 && middle < end - 0.2, "zoom went {start} -> {middle} -> {end}");
-        let view = plan.camera_at(2_800.0);
-        assert!(view.x >= 0.0 && view.y >= 0.0 && view.x + view.w <= FRAME.w + 0.01 && view.y + view.h <= FRAME.h + 0.01);
     }
 
     #[test]
