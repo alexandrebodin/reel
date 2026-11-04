@@ -4,6 +4,7 @@ pub mod plan;
 pub mod render;
 pub mod screencast;
 pub mod script;
+pub mod server;
 pub mod style;
 pub mod timeline;
 
@@ -66,7 +67,7 @@ mod tests {
     }
 
     fn recording(timeline: Option<timeline::Timeline>) -> Recording {
-        Recording { video: "/nonexistent/raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 1_000.0, events: vec![], style: Default::default(), timeline }
+        Recording { video: "/nonexistent/raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 1_000.0, events: vec![], style: Default::default(), timeline, imported: false }
     }
 
     #[test]

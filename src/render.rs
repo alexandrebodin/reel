@@ -55,6 +55,7 @@ pub struct Compositor {
     /// Frame pixels per CSS pixel: the plan and the style are in CSS pixels.
     density: f32,
     inner: Rect,
+    radius: f32,
     background: Pixmap,
     video_mask: Mask,
     arrow: Shape,
@@ -87,7 +88,7 @@ impl Compositor {
         let mut video_mask = Mask::new(width, height).expect("frame size");
         video_mask.fill_path(&window, FillRule::Winding, true, Transform::identity());
 
-        Ok(Compositor { style: style.clone(), density, inner, background, video_mask, arrow: arrow(), hand: hand(), beam: beam() })
+        Ok(Compositor { style: style.clone(), density, inner, radius, background, video_mask, arrow: arrow(), hand: hand(), beam: beam() })
     }
 
     pub fn compose(&self, source: &Pixmap, view: View, cursor: Option<Cursor>, ripples: &[Ripple]) -> Pixmap {
@@ -135,8 +136,34 @@ impl Compositor {
         if !(self.inner.left()..=self.inner.right()).contains(&x) || !(self.inner.top()..=self.inner.bottom()).contains(&y) {
             return;
         }
-        let size = CURSOR_SIZE / 20.0 * self.density * (scale / self.density).powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * cursor.pressed as f32);
+        let size = self.cursor_scale(view, cursor.pressed);
         self.draw_cursor(out, x - left, y - top, size, cursor.opacity as f32, cursor.pointer);
+    }
+
+    /// Frame pixels per unit of the cursor's shape.
+    pub fn cursor_scale(&self, view: View, pressed: f64) -> f32 {
+        let scale = self.inner.width() / view.w as f32;
+        CURSOR_SIZE / 20.0 * self.density * (scale / self.density).powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * pressed as f32)
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    pub fn inner(&self) -> Rect {
+        self.inner
+    }
+
+    pub fn background_png(&self) -> Result<Vec<u8>> {
+        self.background.encode_png().context("encoding the background")
+    }
+
+    /// The pointer alone on a transparent square, its tip at `SPRITE_TIP` and `SPRITE_SCALE` pixels
+    /// per unit of its shape: lets a preview draw the very cursor a render will.
+    pub fn sprite_png(&self, pointer: Pointer) -> Result<Vec<u8>> {
+        let mut sprite = Pixmap::new(SPRITE_SIZE, SPRITE_SIZE).expect("sprite size");
+        self.draw_cursor(&mut sprite, SPRITE_TIP, SPRITE_TIP, SPRITE_SCALE, 1.0, pointer);
+        sprite.encode_png().context("encoding the cursor")
     }
 
     /// Averages the frame across the shots of one shutter. Only what moves is drawn more than once:
@@ -218,6 +245,9 @@ impl Compositor {
 }
 
 const CURSOR_SIZE: f32 = 26.0;
+pub const SPRITE_SIZE: u32 = 256;
+pub const SPRITE_TIP: f32 = 64.0;
+pub const SPRITE_SCALE: f32 = 8.0;
 
 fn average(frames: impl Iterator<Item = Pixmap>, count: u32) -> Pixmap {
     let mut sums: Vec<u32> = Vec::new();
@@ -363,6 +393,10 @@ pub fn video_duration_ms(video: &Path) -> Result<f64> {
 /// Decodes the raw take frame by frame, composites each output frame at the capture's density and
 /// streams it to an H.264 encoder, which downsamples to the demo's size.
 pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
+    render_with_progress(recording, plan, output, &|_| {})
+}
+
+pub fn render_with_progress(recording: &Recording, plan: &Plan, output: &Path, progress: &dyn Fn(f64)) -> Result<()> {
     let [css_width, css_height] = recording.size;
     let (source_width, source_height) = (css_width * recording.scale, css_height * recording.scale);
     let layout = Layout::new(recording.size, recording.scale, &recording.style.background);
@@ -392,7 +426,6 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     let mut current: Option<Arc<Pixmap>> = None;
     let mut decoded: i64 = -1;
     let total = (plan.time.output_duration_ms() / 1_000.0 * fps).ceil() as i64;
-    let (shots, shutter) = recording.style.motion_blur.shutter();
     let frame_ms = 1_000.0 / fps;
     let mut batch: Vec<(Arc<Pixmap>, Vec<f64>)> = Vec::with_capacity(workers);
     for index in 0..total {
@@ -410,13 +443,13 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
             }
         }
         let Some(source) = current.as_ref() else { bail!("the raw video has no frames") };
-        let times = (0..shots).map(|shot| plan.time.source_ms(output_ms + shot as f64 / shots as f64 * shutter * frame_ms)).collect();
-        batch.push((source.clone(), times));
+        batch.push((source.clone(), shutter_times(recording, plan, output_ms)));
         if batch.len() == workers || index == total - 1 {
             for frame in compose_all(&compositor, plan, &batch) {
                 sink.write_all(frame.data())?;
             }
             batch.clear();
+            progress((index + 1) as f64 / total as f64);
         }
     }
     drop(sink);
@@ -428,15 +461,45 @@ pub fn render(recording: &Recording, plan: &Plan, output: &Path) -> Result<()> {
     Ok(())
 }
 
+fn shutter_times(recording: &Recording, plan: &Plan, output_ms: f64) -> Vec<f64> {
+    let (shots, shutter) = recording.style.motion_blur.shutter();
+    let frame_ms = 1_000.0 / recording.fps as f64;
+    (0..shots).map(|shot| plan.time.source_ms(output_ms + shot as f64 / shots as f64 * shutter * frame_ms)).collect()
+}
+
+fn compose_shots(compositor: &Compositor, plan: &Plan, source: &Pixmap, times: &[f64]) -> Pixmap {
+    let shots: Vec<(View, Cursor)> = times.iter().map(|t| (plan.camera_at(*t), plan.cursor_at(*t))).collect();
+    compositor.compose_blurred(source, &shots, &plan.ripples_at(times[0]))
+}
+
+/// The frame a render shows at a source time, drawn on its own.
+pub fn exact_frame(recording: &Recording, plan: &Plan, compositor: &Compositor, source: &Pixmap, source_ms: f64) -> Pixmap {
+    compose_shots(compositor, plan, source, &shutter_times(recording, plan, plan.time.output_ms(source_ms)))
+}
+
+/// Decodes one frame of the take at the size a render composites it.
+pub fn read_source_frame(recording: &Recording, source_ms: f64) -> Result<Pixmap> {
+    let [css_width, css_height] = recording.size;
+    let (width, height) = (css_width * recording.scale, css_height * recording.scale);
+    let index = (source_ms * recording.fps as f64 / 1_000.0).floor();
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-ss", &format!("{:.4}", index / recording.fps as f64), "-i"])
+        .arg(&recording.video)
+        .args(["-frames:v", "1", "-vf", &format!("scale={width}:{height}:flags=lanczos"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()
+        .context("starting ffmpeg")?;
+    if !output.status.success() || output.stdout.len() != (width * height * 4) as usize {
+        bail!("could not read the take at {source_ms} ms: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Pixmap::from_vec(output.stdout, tiny_skia::IntSize::from_wh(width, height).context("frame size")?).context("reading a frame")
+}
+
 fn compose_all(compositor: &Compositor, plan: &Plan, batch: &[(Arc<Pixmap>, Vec<f64>)]) -> Vec<Pixmap> {
     thread::scope(|scope| {
         let workers: Vec<_> = batch
             .iter()
             .map(|(source, times)| {
-                scope.spawn(|| {
-                    let shots: Vec<(View, Cursor)> = times.iter().map(|t| (plan.camera_at(*t), plan.cursor_at(*t))).collect();
-                    compositor.compose_blurred(source, &shots, &plan.ripples_at(times[0]))
-                })
+                scope.spawn(|| compose_shots(compositor, plan, source, times))
             })
             .collect();
         workers.into_iter().map(|w| w.join().expect("a compositing thread panicked")).collect()
@@ -561,7 +624,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style: Style::default(), timeline: None };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style: Style::default(), timeline: None, imported: false };
         let output = dir.join("out.mp4");
 
         render(&recording, &plan_for(&recording), &output).unwrap();
@@ -577,12 +640,53 @@ mod tests {
     #[test]
     fn plans_a_saved_timeline_instead_of_the_automatic_pass() {
         let click = crate::events::Event::Click { at_ms: 500.0, target: crate::events::Rect { x: 10.0, y: 10.0, w: 20.0, h: 20.0 }, frame: crate::events::Rect { x: 10.0, y: 10.0, w: 20.0, h: 20.0 }, pointer: Pointer::Arrow };
-        let mut recording = Recording { video: "raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![click], style: Style::default(), timeline: None };
+        let mut recording = Recording { video: "raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 4_000.0, events: vec![click], style: Style::default(), timeline: None, imported: false };
         assert!(plan_for(&recording).camera_at(1_500.0).w < 320.0, "the automatic pass did not zoom");
 
         recording.timeline = Some(crate::timeline::Timeline::default());
 
         assert_eq!(plan_for(&recording).camera_at(1_500.0).w, 320.0);
+    }
+
+    #[test]
+    fn draws_the_sprite_cursor_on_transparency_with_its_tip_in_place() {
+        let c = compositor([200, 100], 1, &flat(BLACK));
+
+        let sprite = Pixmap::decode_png(&c.sprite_png(Pointer::Arrow).unwrap()).unwrap();
+
+        assert_eq!(sprite.pixel(2, 2).unwrap().alpha(), 0);
+        let tip = SPRITE_TIP as u32;
+        assert!(sprite.pixel(tip + 8, tip + 40).unwrap().alpha() > 200, "nothing below the tip");
+        assert_eq!(sprite.pixel(tip - 20, tip + 40).unwrap().alpha(), 0, "drawn left of the tip");
+    }
+
+    #[test]
+    fn grows_the_cursor_with_the_zoom_and_shrinks_it_when_pressed() {
+        let c = compositor([200, 100], 1, &flat(BLACK));
+        let zoomed = View { x: 0.0, y: 0.0, w: 100.0, h: 50.0 };
+
+        assert!(c.cursor_scale(zoomed, 0.0) > c.cursor_scale(FULL, 0.0));
+        assert!(c.cursor_scale(FULL, 1.0) < c.cursor_scale(FULL, 0.0));
+    }
+
+    #[test]
+    fn reads_the_asked_frame_of_the_take_and_matches_the_render_of_it() {
+        let dir = std::env::temp_dir().join(format!("reel-exact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("raw.mp4");
+        let filter = "color=red:s=64x36:r=10:d=1[a];color=blue:s=64x36:r=10:d=1[b];[a][b]concat=n=2:v=1[out]";
+        let made = Command::new("ffmpeg").args(["-v", "error", "-y", "-filter_complex", filter, "-map", "[out]", "-pix_fmt", "yuv420p"]).arg(&video).status().unwrap();
+        assert!(made.success());
+        let recording = Recording { video, size: [64, 36], scale: 1, fps: 10, duration_ms: 2_000.0, events: vec![], style: flat(BLACK), timeline: None, imported: false };
+
+        let early = read_source_frame(&recording, 200.0).unwrap();
+        let late = read_source_frame(&recording, 1_700.0).unwrap();
+
+        assert!(near(rgb(&early, 30, 18), Rgb([254, 0, 0])), "{:?}", rgb(&early, 30, 18));
+        assert!(near(rgb(&late, 30, 18), Rgb([0, 0, 254])), "{:?}", rgb(&late, 30, 18));
+        let c = compositor([64, 36], 1, &recording.style);
+        let frame = exact_frame(&recording, &plan_for(&recording), &c, &late, 1_700.0);
+        assert!(near(rgb(&frame, 5, 5), Rgb([0, 0, 254])), "{:?}", rgb(&frame, 5, 5));
     }
 
     fn backdrop(fill: Fill, padding: f64, shadow: f64, corners: f64) -> Style {
@@ -695,7 +799,7 @@ mod tests {
             .unwrap();
         assert!(made.success());
         let style = Style { background: Background { aspect: Aspect::Ratio(1, 1), ..Background::default() }, ..Style::default() };
-        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style, timeline: None };
+        let recording = Recording { video, size: [320, 180], scale: 2, fps: 10, duration_ms: 1_000.0, events: vec![], style, timeline: None, imported: false };
         let output = dir.join("out.mp4");
 
         render(&recording, &plan_for(&recording), &output).unwrap();

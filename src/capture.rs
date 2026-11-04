@@ -111,6 +111,9 @@ pub struct Recording {
     /// keeps deciding things like how far the camera zooms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<Timeline>,
+    /// Came from an existing video, with no event log: the automatic pass reads the pixels instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 impl Recording {
@@ -160,7 +163,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     let duration_ms = elapsed();
     browser.stop_recording()?;
 
-    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone(), timeline: None })
+    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone(), timeline: None, imported: false })
 }
 
 /// Runs one step and returns what it showed on screen, timed by `elapsed`.
@@ -584,6 +587,7 @@ mod tests {
             events: vec![Event::Click { at_ms: 2_000.0, target, frame: target, pointer: Pointer::Arrow }],
             style: Style::default(),
             timeline: None,
+            imported: false,
         };
 
         align_to_video(&mut recording, 10_300.0);
