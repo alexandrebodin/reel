@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: reel <demo.json> [out.mp4] [--style key=value]...\n       reel --render <recording.json> [out.mp4] [--style key=value]...\n       reel edit <recording.json> [--no-open]";
+const USAGE: &str = "usage: reel <demo.json> [out.mp4] [--style key=value]...\n       reel --render <recording.json> [out.mp4] [--style key=value]...\n       reel edit <recording.json | video> [--no-open]";
 
 fn main() {
     let (positional, style) = split_style_flags(std::env::args().skip(1).collect());

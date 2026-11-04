@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod editor;
 pub mod events;
+pub mod motion;
 pub mod plan;
 pub mod render;
 pub mod screencast;
@@ -59,9 +60,11 @@ pub fn render_file(recording_path: &Path, output: Option<PathBuf>, style_overrid
     Ok(output)
 }
 
-/// Opens a recording in the editor and serves it until the process ends.
+/// Opens a recording or any video in the editor and serves it until the process ends.
 pub fn edit(path: &Path, open_browser: bool) -> Result<()> {
-    let editor = Arc::new(Editor::open(path)?);
+    let is_recording = path.extension().is_some_and(|e| e == "json");
+    let recording = if is_recording { path.to_path_buf() } else { motion::import(path)? };
+    let editor = Arc::new(Editor::open(&recording)?);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let url = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
     println!("{url}");

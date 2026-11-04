@@ -11,6 +11,7 @@ use tiny_skia::Pixmap;
 
 use crate::capture::Recording;
 use crate::events::Pointer;
+use crate::motion::analyze;
 use crate::plan::Plan;
 use crate::render::{exact_frame, read_source_frame, render_with_progress, snapped_to_frame, Compositor, Layout, SPRITE_SCALE, SPRITE_SIZE, SPRITE_TIP};
 use crate::server::{Request, Response};
@@ -151,7 +152,11 @@ impl Editor {
                     recording.timeline = timeline;
                 })?
             }
-            ("POST", "/api/auto") => self.apply(|recording| recording.timeline = None)?,
+            ("POST", "/api/auto") => {
+                let recording = self.lock().recording.clone();
+                let guess = if recording.imported { Some(analyze(&recording)?.validated(recording.duration_ms)?) } else { None };
+                self.apply(|recording| recording.timeline = guess)?
+            }
             ("POST", "/api/render") => self.start_render()?,
             ("GET", "/api/render") => {
                 let job = self.job.lock().expect("render job");

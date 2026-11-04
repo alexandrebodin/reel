@@ -728,12 +728,12 @@ function renderForm() {
   const percent = v => `${Math.round(v)}%`, times = v => `${v.toFixed(2)}×`;
   group("Camera", box => {
     const level = styleRange("zoom.level", 1, 4, 0.05, times);
-    level.input.disabled = edited;
+    level.input.disabled = edited && !project.imported;
     box.append(field("Zoom level", level));
     if (edited) {
       const hint = document.createElement("p");
       hint.className = "hint";
-      hint.textContent = "Sets the automatic zooms. This timeline has been edited: select a zoom to change it, or reset to automatic.";
+      hint.textContent = project.imported ? "Takes effect when you reset to automatic. To change one zoom, select it." : "Sets the automatic zooms. This timeline has been edited: select a zoom to change it, or reset to automatic.";
       box.append(hint);
     }
     box.append(field("Zoom motion", styleSegments("zoom.animation", [["smooth", "Smooth"], ["dynamic", "Dynamic"]])));
