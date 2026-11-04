@@ -11,6 +11,7 @@ use tiny_skia::{
 };
 
 use crate::capture::Recording;
+use crate::events::Pointer;
 use crate::plan::{Cursor, Plan, Ripple, Size, View};
 use crate::style::{Aspect, Background, CursorLook, Fill, Rgb, RippleStyle, Style};
 
@@ -57,6 +58,8 @@ pub struct Compositor {
     background: Pixmap,
     video_mask: Mask,
     arrow: Shape,
+    hand: Shape,
+    beam: Shape,
 }
 
 impl Compositor {
@@ -84,7 +87,7 @@ impl Compositor {
         let mut video_mask = Mask::new(width, height).expect("frame size");
         video_mask.fill_path(&window, FillRule::Winding, true, Transform::identity());
 
-        Ok(Compositor { style: style.clone(), density, inner, background, video_mask, arrow: arrow() })
+        Ok(Compositor { style: style.clone(), density, inner, background, video_mask, arrow: arrow(), hand: hand(), beam: beam() })
     }
 
     pub fn compose(&self, source: &Pixmap, view: View, cursor: Option<Cursor>, ripples: &[Ripple]) -> Pixmap {
@@ -130,7 +133,7 @@ impl Compositor {
         let scale = self.inner.width() / view.w as f32;
         let (x, y) = (self.inner.x() + (cursor.x - view.x) as f32 * scale, self.inner.y() + (cursor.y - view.y) as f32 * scale);
         let size = CURSOR_SIZE / 20.0 * self.density * (scale / self.density).powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * cursor.pressed as f32);
-        self.draw_cursor(out, x - left, y - top, size, cursor.opacity as f32);
+        self.draw_cursor(out, x - left, y - top, size, cursor.opacity as f32, cursor.pointer);
     }
 
     /// Averages the frame across the shots of one shutter. Only what moves is drawn more than once:
@@ -179,7 +182,7 @@ impl Compositor {
         )
     }
 
-    fn draw_cursor(&self, out: &mut Pixmap, x: f32, y: f32, size: f32, opacity: f32) {
+    fn draw_cursor(&self, out: &mut Pixmap, x: f32, y: f32, size: f32, opacity: f32, pointer: Pointer) {
         let at = Transform::from_translate(x, y).pre_scale(size, size);
         let paint = |r: u8, g: u8, b: u8, a: f32| {
             let mut paint = Paint { anti_alias: true, ..Paint::default() };
@@ -196,9 +199,18 @@ impl Compositor {
                 return;
             }
         };
-        out.fill_path(&self.arrow, &paint(0, 0, 0, 0.27), FillRule::Winding, at.post_translate(1.5 * size, 2.5 * size), None);
-        out.fill_path(&self.arrow, &body, FillRule::Winding, at, None);
-        out.stroke_path(&self.arrow, &line, &Stroke { width: 1.4, ..Stroke::default() }, at, None);
+        let silhouette = match pointer {
+            Pointer::Arrow => &self.arrow,
+            Pointer::Hand => &self.hand,
+            Pointer::Text => {
+                out.stroke_path(&self.beam, &line, &Stroke { width: 3.4, ..Stroke::default() }, at, None);
+                out.stroke_path(&self.beam, &body, &Stroke { width: 1.5, ..Stroke::default() }, at, None);
+                return;
+            }
+        };
+        out.fill_path(silhouette, &paint(0, 0, 0, 0.27), FillRule::Winding, at.post_translate(1.5 * size, 2.5 * size), None);
+        out.fill_path(silhouette, &body, FillRule::Winding, at, None);
+        out.stroke_path(silhouette, &line, &Stroke { width: 1.4, ..Stroke::default() }, at, None);
     }
 }
 
@@ -297,6 +309,42 @@ fn arrow() -> Shape {
     }
     path.close();
     path.finish().expect("the arrow is a valid path")
+}
+
+/// A pointing hand with its fingertip at the origin.
+fn hand() -> Shape {
+    let mut path = PathBuilder::new();
+    path.move_to(-1.7, 1.5);
+    path.quad_to(-1.7, 0.0, 0.0, 0.0);
+    path.quad_to(1.7, 0.0, 1.7, 1.5);
+    path.line_to(1.7, 6.6);
+    path.quad_to(3.2, 5.7, 4.3, 6.9);
+    path.quad_to(5.9, 6.2, 6.9, 7.6);
+    path.quad_to(8.6, 7.1, 9.3, 8.8);
+    path.line_to(9.3, 13.2);
+    path.quad_to(9.3, 17.8, 5.6, 18.6);
+    path.line_to(0.6, 18.6);
+    path.quad_to(-1.4, 18.6, -2.6, 16.6);
+    path.line_to(-6.2, 11.2);
+    path.quad_to(-7.0, 9.6, -5.6, 9.0);
+    path.quad_to(-4.4, 8.6, -3.2, 10.0);
+    path.line_to(-1.7, 11.8);
+    path.close();
+    path.finish().expect("the hand is a valid path")
+}
+
+/// A text cursor centered on the origin.
+fn beam() -> Shape {
+    let mut path = PathBuilder::new();
+    path.move_to(-3.0, -9.0);
+    path.quad_to(0.0, -9.0, 0.0, -7.0);
+    path.quad_to(0.0, -9.0, 3.0, -9.0);
+    path.move_to(0.0, -7.0);
+    path.line_to(0.0, 7.0);
+    path.move_to(-3.0, 9.0);
+    path.quad_to(0.0, 9.0, 0.0, 7.0);
+    path.quad_to(0.0, 9.0, 3.0, 9.0);
+    path.finish().expect("the text cursor is a valid path")
 }
 
 pub fn video_duration_ms(video: &Path) -> Result<f64> {
@@ -488,7 +536,7 @@ mod tests {
     fn draws_the_cursor_at_its_css_position_on_a_2x_frame() {
         let mut white = Pixmap::new(400, 200).unwrap();
         white.fill(Color::WHITE);
-        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0 };
+        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0, pointer: Pointer::Arrow };
 
         let out = compositor([200, 100], 2, &flat(BLACK)).compose(&white, View { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, Some(cursor), &[]);
 
@@ -647,7 +695,7 @@ mod tests {
     fn draws_the_cursor_where_the_plan_puts_it() {
         let mut white = Pixmap::new(200, 100).unwrap();
         white.fill(Color::WHITE);
-        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0 };
+        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0, pointer: Pointer::Arrow };
 
         let out = compositor([200, 100], 1, &flat(BLACK)).compose(&white, FULL, Some(cursor), &[]);
 
@@ -667,7 +715,7 @@ mod tests {
         compositor([200, 100], 1, &style).compose(&white_frame(), FULL, Some(at), &[])
     }
 
-    const SPOT: Cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0 };
+    const SPOT: Cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0, pointer: Pointer::Arrow };
 
     fn dark_pixels(out: &Pixmap) -> usize {
         (0..200).flat_map(|x| (0..100).map(move |y| (x, y))).filter(|&(x, y)| rgb(out, x, y).0[0] < 128).count()
@@ -776,6 +824,27 @@ mod tests {
 
         let left = rgb(&out, 20, 50).0;
         assert!(left[0] > 80 && left[2] > 80, "left edge is {left:?}, not red and blue averaged");
+    }
+
+    #[test]
+    fn draws_a_different_shape_for_each_pointer() {
+        let draw = |pointer| cursor_frame(CursorStyle::default(), Cursor { pointer, ..SPOT });
+        let (arrow, hand, text) = (draw(Pointer::Arrow), draw(Pointer::Hand), draw(Pointer::Text));
+
+        assert_ne!(arrow.data(), hand.data());
+        assert_ne!(arrow.data(), text.data());
+        assert!((56..=64).any(|x| rgb(&text, x, 30).0[0] < 128), "no text cursor on its position");
+        assert!(dark_pixels(&text) < dark_pixels(&hand), "{} against {}", dark_pixels(&text), dark_pixels(&hand));
+    }
+
+    #[test]
+    fn keeps_a_dot_whatever_the_page_asks_for() {
+        let dot = CursorStyle { style: CursorLook::Dot, ..CursorStyle::default() };
+
+        let plain = cursor_frame(dot.clone(), SPOT);
+        let over_a_link = cursor_frame(dot, Cursor { pointer: Pointer::Hand, ..SPOT });
+
+        assert_eq!(plain.data(), over_a_link.data());
     }
 
     #[test]

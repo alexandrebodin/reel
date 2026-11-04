@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::events::{Event, Rect};
+use crate::events::{Event, Pointer, Rect};
 use crate::screencast::Screencast;
 use crate::script::{Script, Step};
 use crate::style::Style;
@@ -150,7 +150,7 @@ fn perform(
         Step::Click { target } => {
             let found = locate(browser, target)?;
             sleep(pacing.between_actions.saturating_sub(last_action.elapsed()));
-            let mut events = vec![Event::Click { at_ms: elapsed(), target: found.target, frame: found.frame }];
+            let mut events = vec![Event::Click { at_ms: elapsed(), target: found.target, frame: found.frame, pointer: found.pointer }];
             browser.run(&["click", &found.selector], None)?;
             *last_action = Instant::now();
             sleep(pacing.after_click);
@@ -169,7 +169,7 @@ fn perform(
                 sleep(pacing.between_keys);
             }
             *last_action = Instant::now();
-            Ok(vec![Event::Type { at_ms, until_ms: elapsed(), target: found.target, frame: found.frame }])
+            Ok(vec![Event::Type { at_ms, until_ms: elapsed(), target: found.target, frame: found.frame, pointer: found.pointer }])
         }
         Step::Pause { ms } => {
             let at_ms = elapsed();
@@ -256,6 +256,7 @@ struct Located {
     target: Rect,
     frame: Rect,
     selector: String,
+    pointer: Pointer,
 }
 
 fn rect_from(value: &Value) -> Option<Rect> {
@@ -270,7 +271,7 @@ fn locate(browser: &mut dyn Browser, target: &str) -> Result<Located> {
     loop {
         let found = &browser.run(&["eval", "--stdin"], Some(&script))?["result"];
         if let (Some(id), Some(rect), Some(frame)) = (found["id"].as_str(), rect_from(found), rect_from(&found["frame"])) {
-            return Ok(Located { target: rect, frame, selector: format!("[data-reel=\"{id}\"]") });
+            return Ok(Located { target: rect, frame, selector: format!("[data-reel=\"{id}\"]"), pointer: Pointer::from_css(found["cursor"].as_str()) });
         }
         if Instant::now() > deadline {
             bail!("no visible element for {target}");
@@ -312,7 +313,7 @@ const LOCATE_JS: &str = r#"(target) => {
     }
     return own;
   };
-  return { id, ...box(own), frame: box(frameOf()) };
+  return { id, ...box(own), frame: box(frameOf()), cursor: getComputedStyle(el).cursor };
 }"#;
 
 const OVERLAY_JS: &str = r#"() => {
@@ -361,6 +362,7 @@ mod tests {
                     "id": "abc",
                     "x": TARGET.x, "y": TARGET.y, "w": TARGET.w, "h": TARGET.h,
                     "frame": { "x": ROW.x, "y": ROW.y, "w": ROW.w, "h": ROW.h },
+                    "cursor": "pointer",
                 } }));
             }
             Ok(json!({}))
@@ -396,7 +398,7 @@ mod tests {
 
         let recording = capture(&script(steps), &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
 
-        assert!(matches!(recording.events[0], Event::Click { target, frame, .. } if target == TARGET && frame == ROW));
+        assert!(matches!(recording.events[0], Event::Click { target, frame, pointer: Pointer::Hand, .. } if target == TARGET && frame == ROW));
         assert!(matches!(recording.events[1], Event::Type { target, frame, .. } if target == TARGET && frame == ROW));
         assert!(matches!(recording.events[2], Event::Pause { .. }));
         let clicks: Vec<&String> = browser.commands.iter().filter(|c| c.starts_with("click")).collect();
@@ -554,13 +556,13 @@ mod tests {
             scale: 1,
             fps: 60,
             duration_ms: 10_000.0,
-            events: vec![Event::Click { at_ms: 2_000.0, target, frame: target }],
+            events: vec![Event::Click { at_ms: 2_000.0, target, frame: target, pointer: Pointer::Arrow }],
             style: Style::default(),
         };
 
         align_to_video(&mut recording, 10_300.0);
 
-        assert_eq!(recording.events, vec![Event::Click { at_ms: 2_300.0, target, frame: target }]);
+        assert_eq!(recording.events, vec![Event::Click { at_ms: 2_300.0, target, frame: target, pointer: Pointer::Arrow }]);
         assert_eq!(recording.duration_ms, 10_300.0);
     }
 }

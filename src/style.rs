@@ -101,11 +101,13 @@ pub struct CursorStyle {
     pub motion: CursorMotion,
     pub hide_when_idle: bool,
     pub hide_when_typing: bool,
+    /// Turns into a hand or a text cursor over elements that ask for one.
+    pub adaptive: bool,
 }
 
 impl Default for CursorStyle {
     fn default() -> CursorStyle {
-        CursorStyle { show: true, size: 1.0, style: CursorLook::WhiteArrow, motion: CursorMotion::Natural, hide_when_idle: false, hide_when_typing: false }
+        CursorStyle { show: true, size: 1.0, style: CursorLook::WhiteArrow, motion: CursorMotion::Natural, hide_when_idle: false, hide_when_typing: false, adaptive: true }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::events::{Event, Rect};
+use crate::events::{Event, Pointer, Rect};
 use crate::style::{Clicks, CursorMotion, CursorStyle, Style, ZoomAnimation};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,6 +34,7 @@ pub struct Cursor {
     pub pressed: f64,
     /// 0 when hidden, 1 when fully shown.
     pub opacity: f64,
+    pub pointer: Pointer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,6 +61,8 @@ const PRESS_LEAD_MS: f64 = 60.0;
 const PRESS_MS: f64 = 140.0;
 const RELEASE_MS: f64 = 80.0;
 const RIPPLE_MS: f64 = 500.0;
+const LEAVES_ELEMENT_MS: f64 = 80.0;
+const ENTERS_ELEMENT_MS: f64 = 90.0;
 const IDLE_BEFORE_HIDING_MS: f64 = 800.0;
 const FADE_MS: f64 = 180.0;
 const IDLE_EDGE_MS: f64 = 400.0;
@@ -87,6 +90,7 @@ struct Move {
     end_ms: f64,
     from: (f64, f64),
     to: (f64, f64),
+    pointer: Pointer,
 }
 
 impl Plan {
@@ -157,7 +161,22 @@ impl Plan {
             position = m.to;
         }
         let pressed = if self.click_style.press { self.clicks.iter().map(|(at, _)| press_amount(t_ms - at)).fold(0.0, f64::max) } else { 0.0 };
-        Cursor { x: position.0, y: position.1, pressed, opacity: self.cursor_opacity(t_ms) }
+        Cursor { x: position.0, y: position.1, pressed, opacity: self.cursor_opacity(t_ms), pointer: self.pointer_at(t_ms) }
+    }
+
+    /// The arrow crossing the page, and whatever the element it rests on shows.
+    fn pointer_at(&self, t_ms: f64) -> Pointer {
+        if !self.cursor_style.adaptive {
+            return Pointer::Arrow;
+        }
+        let mut pointer = Pointer::Arrow;
+        for m in &self.moves {
+            if t_ms < m.start_ms + LEAVES_ELEMENT_MS {
+                break;
+            }
+            pointer = if t_ms < m.end_ms - ENTERS_ELEMENT_MS { Pointer::Arrow } else { m.pointer };
+        }
+        pointer
     }
 
     fn cursor_opacity(&self, t_ms: f64) -> f64 {
@@ -244,7 +263,7 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
         if let Some(target) = event.cursor_target() {
             let to = target.center();
             if position != to {
-                moves.push(Move { start_ms: travel_ms.min(arrive_ms - MIN_CURSOR_TRAVEL_MS), end_ms: arrive_ms, from: position, to });
+                moves.push(Move { start_ms: travel_ms.min(arrive_ms - MIN_CURSOR_TRAVEL_MS), end_ms: arrive_ms, from: position, to, pointer: event.pointer() });
             }
             position = to;
         }
@@ -484,7 +503,7 @@ mod tests {
     }
 
     fn click(at_ms: f64, target: Rect) -> Event {
-        Event::Click { at_ms, target, frame: target }
+        Event::Click { at_ms, target, frame: target, pointer: Pointer::Arrow }
     }
 
     fn close(a: f64, b: f64) -> bool {
@@ -552,7 +571,7 @@ mod tests {
     fn keeps_the_row_of_a_clicked_control_in_view() {
         let menu_button = Rect { x: 1425.0, y: 485.0, w: 32.0, h: 32.0 };
         let row = Rect { x: 704.0, y: 472.0, w: 768.0, h: 58.0 };
-        let plan = plan(&[Event::Click { at_ms: 2_000.0, target: menu_button, frame: row }], 6_000.0);
+        let plan = plan(&[Event::Click { at_ms: 2_000.0, target: menu_button, frame: row, pointer: Pointer::Arrow }], 6_000.0);
 
         let view = plan.camera_at(3_000.0);
 
@@ -729,7 +748,7 @@ mod tests {
     #[test]
     fn stays_visible_unless_asked_to_hide() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
-        let events = [Event::Type { at_ms: 1_000.0, until_ms: 3_000.0, target: field, frame: field }];
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 3_000.0, target: field, frame: field, pointer: Pointer::Arrow }];
         let plan = plan(&events, 20_000.0);
 
         for t in [0.0, 2_000.0, 15_000.0] {
@@ -764,13 +783,35 @@ mod tests {
     #[test]
     fn hides_while_typing_and_returns_after() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
-        let events = [Event::Type { at_ms: 2_000.0, until_ms: 4_000.0, target: field, frame: field }];
+        let events = [Event::Type { at_ms: 2_000.0, until_ms: 4_000.0, target: field, frame: field, pointer: Pointer::Arrow }];
         let plan = with_cursor(CursorStyle { hide_when_typing: true, ..CursorStyle::default() }, &events, 8_000.0);
 
         assert_eq!(plan.cursor_at(1_500.0).opacity, 1.0);
         assert_eq!(plan.cursor_at(2_000.0).opacity, 1.0, "hidden as it arrived at the field");
         assert_eq!(plan.cursor_at(3_000.0).opacity, 0.0);
         assert_eq!(plan.cursor_at(5_000.0).opacity, 1.0);
+    }
+
+    #[test]
+    fn shows_what_the_page_would_show_while_resting_on_an_element() {
+        let link = Event::Click { at_ms: 2_000.0, target: BUTTON, frame: BUTTON, pointer: Pointer::Hand };
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let field = Event::Click { at_ms: 5_000.0, target: far, frame: far, pointer: Pointer::Text };
+        let plan = plan(&[link, field], 8_000.0);
+
+        assert_eq!(plan.cursor_at(1_500.0).pointer, Pointer::Arrow, "changed long before arriving");
+        assert_eq!(plan.cursor_at(2_000.0).pointer, Pointer::Hand);
+        assert_eq!(plan.cursor_at(3_000.0).pointer, Pointer::Hand);
+        assert_eq!(plan.cursor_at(4_500.0).pointer, Pointer::Arrow, "kept the hand while crossing the page");
+        assert_eq!(plan.cursor_at(5_000.0).pointer, Pointer::Text);
+    }
+
+    #[test]
+    fn stays_an_arrow_when_not_adaptive() {
+        let link = Event::Click { at_ms: 2_000.0, target: BUTTON, frame: BUTTON, pointer: Pointer::Hand };
+        let plan = with_cursor(CursorStyle { adaptive: false, ..CursorStyle::default() }, &[link], 6_000.0);
+
+        assert_eq!(plan.cursor_at(2_000.0).pointer, Pointer::Arrow);
     }
 
     #[test]
@@ -833,7 +874,7 @@ mod tests {
     #[test]
     fn keeps_short_typing_at_real_speed() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
-        let events = [Event::Type { at_ms: 1_000.0, until_ms: 1_900.0, target: field, frame: field }];
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 1_900.0, target: field, frame: field, pointer: Pointer::Arrow }];
         let plan = plan(&events, 4_000.0);
 
         assert!(close(plan.time.output_duration_ms(), 4_000.0), "output was {}", plan.time.output_duration_ms());
@@ -842,7 +883,7 @@ mod tests {
     #[test]
     fn plays_typing_faster() {
         let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
-        let events = [Event::Type { at_ms: 1_000.0, until_ms: 6_000.0, target: field, frame: field }];
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 6_000.0, target: field, frame: field, pointer: Pointer::Arrow }];
         let plan = plan(&events, 9_000.0);
 
         assert!(plan.time.output_duration_ms() < 8_000.0, "output was {}", plan.time.output_duration_ms());
