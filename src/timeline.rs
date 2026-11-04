@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::events::{Event, Pointer, Rect};
@@ -75,6 +76,8 @@ pub struct Typing {
 pub const ZOOM_IN_MS: f64 = 700.0;
 pub const UNZOOM_MS: f64 = 600.0;
 pub const CURSOR_ARRIVES_EARLY_MS: f64 = 120.0;
+pub const MIN_SPEED: f64 = 0.25;
+pub const MAX_SPEED: f64 = 16.0;
 const FOCUS_FOLLOWS_MS: f64 = 800.0;
 const FIT_MARGIN: f64 = 1.25;
 const VIEW_MARGIN: f64 = 24.0;
@@ -112,6 +115,49 @@ impl Timeline {
             _ => None,
         });
         Timeline { zooms, speeds: auto_speeds(events, duration_ms), moves, clicks: clicks.collect(), typing: typing.collect() }
+    }
+}
+
+impl Timeline {
+    /// Checks a timeline that came from outside and puts each track in time order.
+    pub fn validated(mut self, duration_ms: f64) -> Result<Timeline> {
+        self.zooms.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+        self.speeds.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+        self.moves.sort_by(|a, b| a.end_ms.total_cmp(&b.end_ms));
+        self.clicks.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms));
+        self.typing.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+        for zoom in &self.zooms {
+            if zoom.start_ms < 0.0 || zoom.start_ms >= zoom.end_ms || zoom.start_ms >= duration_ms {
+                bail!("a zoom runs from {} to {} ms in a take of {duration_ms} ms", zoom.start_ms, zoom.end_ms);
+            }
+            if !(1.0..=8.0).contains(&zoom.level) {
+                bail!("a zoom level must be between 1 and 8, not {}", zoom.level);
+            }
+        }
+        if let Some(pair) = self.zooms.windows(2).find(|pair| pair[1].start_ms < pair[0].end_ms) {
+            bail!("zooms overlap at {} ms", pair[1].start_ms);
+        }
+        for span in &self.speeds {
+            if span.start_ms < 0.0 || span.start_ms >= span.end_ms || span.end_ms > duration_ms {
+                bail!("a speed change runs from {} to {} ms in a take of {duration_ms} ms", span.start_ms, span.end_ms);
+            }
+            if span.speed.is_some_and(|speed| !(MIN_SPEED..=MAX_SPEED).contains(&speed)) {
+                bail!("a speed must be between {MIN_SPEED} and {MAX_SPEED}, not {:?}", span.speed);
+            }
+        }
+        if let Some(pair) = self.speeds.windows(2).find(|pair| pair[1].start_ms < pair[0].end_ms) {
+            bail!("speed changes overlap at {} ms", pair[1].start_ms);
+        }
+        if let Some(m) = self.moves.iter().find(|m| m.start_ms >= m.end_ms) {
+            bail!("a cursor move runs from {} to {} ms", m.start_ms, m.end_ms);
+        }
+        if let Some(click) = self.clicks.iter().find(|c| !(0.0..=duration_ms).contains(&c.at_ms)) {
+            bail!("a click at {} ms is outside a take of {duration_ms} ms", click.at_ms);
+        }
+        if let Some(typing) = self.typing.iter().find(|t| t.start_ms >= t.end_ms) {
+            bail!("typing runs from {} to {} ms", typing.start_ms, typing.end_ms);
+        }
+        Ok(self)
     }
 }
 
@@ -284,4 +330,89 @@ pub fn idle_zone(start_ms: f64, end_ms: f64) -> Option<SpeedSpan> {
     let speed = length / IDLE_TARGET_MS;
     let speed = if speed > MAX_IDLE_SPEED { None } else { Some(speed.max(MIN_IDLE_SPEED)) };
     Some(SpeedSpan { start_ms, end_ms, speed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zoom(start_ms: f64, end_ms: f64) -> ZoomSpan {
+        ZoomSpan { start_ms, end_ms, x: 100.0, y: 100.0, level: 2.0 }
+    }
+
+    fn speed(start_ms: f64, end_ms: f64, speed: Option<f64>) -> SpeedSpan {
+        SpeedSpan { start_ms, end_ms, speed }
+    }
+
+    fn with_zooms(zooms: Vec<ZoomSpan>) -> Result<Timeline> {
+        Timeline { zooms, ..Timeline::default() }.validated(10_000.0)
+    }
+
+    fn with_speeds(speeds: Vec<SpeedSpan>) -> Result<Timeline> {
+        Timeline { speeds, ..Timeline::default() }.validated(10_000.0)
+    }
+
+    #[test]
+    fn keeps_a_cut_through_its_json_form() {
+        let timeline = Timeline { speeds: vec![speed(1.0, 2.0, None), speed(3.0, 4.0, Some(2.0))], ..Timeline::default() };
+
+        let text = serde_json::to_string(&timeline).unwrap();
+
+        assert_eq!(serde_json::from_str::<Timeline>(&text).unwrap(), timeline);
+    }
+
+    #[test]
+    fn puts_each_track_in_time_order() {
+        let timeline = with_zooms(vec![zoom(5_000.0, 6_000.0), zoom(1_000.0, 2_000.0)]).unwrap();
+
+        assert_eq!(timeline.zooms[0].start_ms, 1_000.0);
+    }
+
+    #[test]
+    fn lets_zooms_touch_but_not_overlap() {
+        assert!(with_zooms(vec![zoom(1_000.0, 2_000.0), zoom(2_000.0, 3_000.0)]).is_ok());
+        assert!(with_zooms(vec![zoom(1_000.0, 2_001.0), zoom(2_000.0, 3_000.0)]).is_err());
+    }
+
+    #[test]
+    fn lets_a_zoom_out_finish_past_the_end_of_the_take_only_if_it_starts_inside() {
+        assert!(with_zooms(vec![zoom(9_000.0, 11_000.0)]).is_ok());
+        assert!(with_zooms(vec![zoom(10_000.0, 11_000.0)]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_zoom_that_is_backwards_or_too_deep() {
+        assert!(with_zooms(vec![zoom(2_000.0, 2_000.0)]).is_err());
+        assert!(with_zooms(vec![zoom(-1.0, 2_000.0)]).is_err());
+        assert!(with_zooms(vec![ZoomSpan { level: 8.5, ..zoom(1.0, 2.0) }]).is_err());
+        assert!(with_zooms(vec![ZoomSpan { level: 0.5, ..zoom(1.0, 2.0) }]).is_err());
+        assert!(with_zooms(vec![ZoomSpan { level: 8.0, ..zoom(1.0, 2.0) }]).is_ok());
+        assert!(with_zooms(vec![ZoomSpan { level: 1.0, ..zoom(1.0, 2.0) }]).is_ok());
+    }
+
+    #[test]
+    fn rejects_speed_changes_that_leave_the_take_overlap_or_are_out_of_range() {
+        assert!(with_speeds(vec![speed(0.0, 10_000.0, Some(2.0))]).is_ok());
+        assert!(with_speeds(vec![speed(0.0, 10_001.0, Some(2.0))]).is_err());
+        assert!(with_speeds(vec![speed(-1.0, 100.0, Some(2.0))]).is_err());
+        assert!(with_speeds(vec![speed(100.0, 100.0, Some(2.0))]).is_err());
+        assert!(with_speeds(vec![speed(0.0, 100.0, Some(2.0)), speed(100.0, 200.0, None)]).is_ok());
+        assert!(with_speeds(vec![speed(0.0, 101.0, Some(2.0)), speed(100.0, 200.0, None)]).is_err());
+        assert!(with_speeds(vec![speed(0.0, 100.0, Some(0.2))]).is_err());
+        assert!(with_speeds(vec![speed(0.0, 100.0, Some(16.5))]).is_err());
+        assert!(with_speeds(vec![speed(0.0, 100.0, Some(MIN_SPEED))]).is_ok());
+        assert!(with_speeds(vec![speed(0.0, 100.0, Some(MAX_SPEED))]).is_ok());
+    }
+
+    #[test]
+    fn rejects_clicks_outside_the_take_and_backwards_moves_and_typing() {
+        let click = |at_ms| Timeline { clicks: vec![Click { at_ms, x: 0.0, y: 0.0 }], ..Timeline::default() }.validated(10_000.0);
+        assert!(click(10_000.0).is_ok());
+        assert!(click(10_001.0).is_err());
+        assert!(click(-1.0).is_err());
+        let moves = vec![Move { start_ms: 5.0, end_ms: 5.0, x: 0.0, y: 0.0, pointer: Pointer::Arrow }];
+        assert!(Timeline { moves, ..Timeline::default() }.validated(10_000.0).is_err());
+        let typing = vec![Typing { start_ms: 5.0, end_ms: 5.0 }];
+        assert!(Timeline { typing, ..Timeline::default() }.validated(10_000.0).is_err());
+    }
 }

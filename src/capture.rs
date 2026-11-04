@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,9 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::events::{Event, Pointer, Rect};
+use crate::plan::Size;
 use crate::screencast::Screencast;
 use crate::script::{Script, Step};
 use crate::style::Style;
+use crate::timeline::Timeline;
 
 /// Runs one agent-browser command and returns its `data`.
 pub trait Browser {
@@ -91,7 +94,7 @@ impl Default for Pacing {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Recording {
     pub video: PathBuf,
     pub size: [u32; 2],
@@ -104,6 +107,28 @@ pub struct Recording {
     /// The look to render with: `--render` reproduces the take without its script.
     #[serde(default)]
     pub style: Style,
+    /// Set once someone edits the take. Until then a render runs the automatic pass, so `style`
+    /// keeps deciding things like how far the camera zooms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<Timeline>,
+}
+
+impl Recording {
+    pub fn load(path: &Path) -> Result<Recording> {
+        let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut recording: Recording = serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        recording.timeline = recording.timeline.map(|t| t.validated(recording.duration_ms)).transpose().with_context(|| format!("reading {}", path.display()))?;
+        Ok(recording)
+    }
+
+    pub fn frame(&self) -> Size {
+        Size { w: self.size[0] as f64, h: self.size[1] as f64 }
+    }
+
+    /// The saved edits, or what the automatic pass makes of the take.
+    pub fn resolved_timeline(&self) -> Timeline {
+        self.timeline.clone().unwrap_or_else(|| Timeline::auto(&self.events, self.duration_ms, self.frame(), &self.style))
+    }
 }
 
 fn one() -> u32 {
@@ -135,7 +160,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     let duration_ms = elapsed();
     browser.stop_recording()?;
 
-    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone() })
+    Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone(), timeline: None })
 }
 
 /// Runs one step and returns what it showed on screen, timed by `elapsed`.
@@ -558,6 +583,7 @@ mod tests {
             duration_ms: 10_000.0,
             events: vec![Event::Click { at_ms: 2_000.0, target, frame: target, pointer: Pointer::Arrow }],
             style: Style::default(),
+            timeline: None,
         };
 
         align_to_video(&mut recording, 10_300.0);

@@ -326,6 +326,18 @@ impl TimeMap {
         self.segments.iter().map(Segment::output_ms).sum()
     }
 
+    /// Where a source time lands in the output. A source time inside a cut lands just after it.
+    pub fn output_ms(&self, source_ms: f64) -> f64 {
+        let mut elapsed = 0.0;
+        for segment in &self.segments {
+            if source_ms < segment.end_ms {
+                return elapsed + (source_ms - segment.start_ms).max(0.0) / segment.speed;
+            }
+            elapsed += segment.output_ms();
+        }
+        elapsed
+    }
+
     pub fn source_ms(&self, output_ms: f64) -> f64 {
         let mut elapsed = 0.0;
         for segment in &self.segments {
@@ -688,6 +700,87 @@ mod tests {
 
         assert_eq!(plan.cursor_at(2_050.0).pressed, 0.0);
         assert!(plan.ripples_at(2_200.0).is_empty());
+    }
+
+    fn zoom_span(start_ms: f64, end_ms: f64, x: f64) -> ZoomSpan {
+        ZoomSpan { start_ms, end_ms, x, y: 540.0, level: 2.0 }
+    }
+
+    fn from_zooms(zooms: Vec<ZoomSpan>) -> Plan {
+        Plan::new(&Timeline { zooms, ..Timeline::default() }, 20_000.0, FRAME, &Style::default())
+    }
+
+    #[test]
+    fn holds_a_saved_zoom_and_comes_back_by_its_end() {
+        let plan = from_zooms(vec![zoom_span(1_000.0, 5_000.0, 500.0)]);
+
+        assert_eq!(plan.camera_at(999.0).zoom(FRAME), 1.0);
+        assert!(close(plan.camera_at(1_700.0).zoom(FRAME), 2.0));
+        assert!(close(plan.camera_at(4_400.0).zoom(FRAME), 2.0));
+        assert!(close(plan.camera_at(3_000.0).center().0, 500.0));
+        assert_eq!(plan.camera_at(5_000.0).zoom(FRAME), 1.0);
+    }
+
+    #[test]
+    fn pans_between_zooms_that_touch_and_zooms_out_between_those_that_do_not() {
+        let touching = from_zooms(vec![zoom_span(1_000.0, 4_000.0, 500.0), zoom_span(4_000.0, 8_000.0, 1_400.0)]);
+        let apart = from_zooms(vec![zoom_span(1_000.0, 4_000.0, 500.0), zoom_span(4_001.0, 8_000.0, 1_400.0)]);
+
+        assert!(close(touching.camera_at(4_000.0).zoom(FRAME), 2.0));
+        assert!(close(touching.camera_at(4_350.0).zoom(FRAME), 2.0), "zoomed out while panning");
+        assert!(close(touching.camera_at(5_000.0).center().0, 1_400.0));
+        assert_eq!(apart.camera_at(4_000.0).zoom(FRAME), 1.0);
+    }
+
+    #[test]
+    fn shares_a_short_zooms_time_between_going_in_and_coming_back() {
+        let plan = from_zooms(vec![zoom_span(1_000.0, 1_130.0, 500.0)]);
+
+        let peak_at = 1_000.0 + 130.0 * ZOOM_IN_MS / (ZOOM_IN_MS + UNZOOM_MS);
+        assert!(close(plan.camera_at(peak_at).zoom(FRAME), 2.0), "{}", plan.camera_at(peak_at).zoom(FRAME));
+        assert_eq!(plan.camera_at(1_130.0).zoom(FRAME), 1.0);
+    }
+
+    #[test]
+    fn stays_on_the_spot_a_saved_zoom_asks_for_even_near_an_edge() {
+        let plan = from_zooms(vec![zoom_span(1_000.0, 5_000.0, 10.0)]);
+
+        assert_eq!(plan.camera_at(3_000.0).x, 0.0);
+    }
+
+    #[test]
+    fn starts_each_saved_move_from_where_the_last_one_ended() {
+        let m = |start_ms, end_ms, x| Move { start_ms, end_ms, x, y: 300.0, pointer: Pointer::Arrow };
+        let timeline = Timeline { moves: vec![m(1_000.0, 2_000.0, 400.0), m(3_000.0, 4_000.0, 800.0)], ..Timeline::default() };
+        let plan = Plan::new(&timeline, 6_000.0, FRAME, &Style::default());
+
+        assert!(close(plan.cursor_at(0.0).x, FRAME.w * 0.62));
+        assert!(close(plan.cursor_at(2_500.0).x, 400.0));
+        let midway = plan.cursor_at(3_500.0).x;
+        assert!(midway > 400.0 && midway < 800.0, "{midway}");
+        assert!(close(plan.cursor_at(5_000.0).x, 800.0));
+    }
+
+    #[test]
+    fn plays_a_saved_speed_change_and_cuts_a_saved_cut() {
+        let speeds = vec![SpeedSpan { start_ms: 1_000.0, end_ms: 3_000.0, speed: Some(2.0) }, SpeedSpan { start_ms: 4_000.0, end_ms: 6_000.0, speed: None }];
+        let plan = Plan::new(&Timeline { speeds, ..Timeline::default() }, 8_000.0, FRAME, &Style::default());
+
+        assert!(close(plan.time.output_duration_ms(), 5_000.0));
+        assert!(close(plan.time.source_ms(1_500.0), 2_000.0));
+        assert!(close(plan.time.source_ms(3_000.0), 6_000.0));
+    }
+
+    #[test]
+    fn finds_the_output_time_of_a_source_time() {
+        let speeds = vec![SpeedSpan { start_ms: 1_000.0, end_ms: 3_000.0, speed: Some(2.0) }, SpeedSpan { start_ms: 4_000.0, end_ms: 6_000.0, speed: None }];
+        let time = TimeMap::new(&speeds, 8_000.0);
+
+        assert!(close(time.output_ms(500.0), 500.0));
+        assert!(close(time.output_ms(2_000.0), 1_500.0));
+        assert!(close(time.output_ms(5_000.0), 3_000.0), "inside a cut, the frame after it");
+        assert!(close(time.output_ms(7_000.0), 4_000.0));
+        assert!(close(time.output_ms(9_000.0), 5_000.0));
     }
 
     #[test]

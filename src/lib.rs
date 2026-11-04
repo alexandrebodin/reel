@@ -10,7 +10,7 @@ pub mod timeline;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Result};
 
 use capture::{align_to_video, capture, AgentBrowser, Browser, Pacing, Recording};
 use render::{plan_for, render, video_duration_ms};
@@ -42,10 +42,56 @@ pub fn record(script_path: &Path, output: Option<PathBuf>, style_overrides: &[St
 }
 
 pub fn render_file(recording_path: &Path, output: Option<PathBuf>, style_overrides: &[String]) -> Result<PathBuf> {
-    let text = fs::read_to_string(recording_path).with_context(|| format!("reading {}", recording_path.display()))?;
-    let mut recording: Recording = serde_json::from_str(&text)?;
-    recording.style = recording.style.overridden(style_overrides)?;
+    let mut recording = Recording::load(recording_path)?;
+    let style = recording.style.overridden(style_overrides)?;
+    if recording.timeline.is_some() && style.zoom.level != recording.style.zoom.level {
+        bail!("zoom.level only shapes the automatic timeline, and {} has been edited: change the zooms in the editor", recording_path.display());
+    }
+    recording.style = style;
     let output = output.unwrap_or_else(|| recording_path.with_file_name("render.mp4"));
     render(&recording, &plan_for(&recording), &output)?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn written(name: &str, recording: &Recording) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("reel-lib-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recording.json");
+        fs::write(&path, serde_json::to_string(recording).unwrap()).unwrap();
+        path
+    }
+
+    fn recording(timeline: Option<timeline::Timeline>) -> Recording {
+        Recording { video: "/nonexistent/raw.mp4".into(), size: [320, 180], scale: 1, fps: 10, duration_ms: 1_000.0, events: vec![], style: Default::default(), timeline }
+    }
+
+    #[test]
+    fn refuses_a_zoom_level_override_on_an_edited_take_and_says_why() {
+        let path = written("edited", &recording(Some(Default::default())));
+
+        let error = render_file(&path, None, &["zoom.level=2".to_string()]).unwrap_err();
+
+        assert!(error.to_string().contains("zoom.level"), "{error}");
+    }
+
+    #[test]
+    fn takes_a_zoom_level_override_on_an_unedited_take() {
+        let path = written("unedited", &recording(None));
+
+        let error = render_file(&path, None, &["zoom.level=2".to_string()]).unwrap_err();
+
+        assert!(!error.to_string().contains("zoom.level"), "{error}");
+    }
+
+    #[test]
+    fn refuses_a_recording_whose_saved_timeline_is_invalid() {
+        let zoom = timeline::ZoomSpan { start_ms: 5.0, end_ms: 1.0, x: 0.0, y: 0.0, level: 2.0 };
+        let path = written("invalid", &recording(Some(timeline::Timeline { zooms: vec![zoom], ..Default::default() })));
+
+        assert!(Recording::load(&path).is_err());
+    }
 }
