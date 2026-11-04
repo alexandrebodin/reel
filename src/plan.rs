@@ -91,7 +91,7 @@ impl Plan {
         Plan {
             frame,
             time: TimeMap::new(events, duration_ms),
-            camera: camera_keys(&focus, frame),
+            camera: camera_keys(&focus, &pauses(events), frame),
             cursor_start,
             moves: cursor_moves(&cursor, cursor_start),
             clicks: events
@@ -158,9 +158,9 @@ fn focus_view(target: Rect, frame: Size) -> View {
     View { x: (cx - w / 2.0).clamp(0.0, frame.w - w), y: (cy - h / 2.0).clamp(0.0, frame.h - h), w, h }
 }
 
-fn camera_keys(focus: &[(&Event, Rect)], frame: Size) -> Vec<(f64, View)> {
+fn camera_keys(focus: &[(&Event, Rect)], pauses: &[(f64, f64)], frame: Size) -> Vec<(f64, View)> {
     let mut keys = vec![(0.0, overview(frame))];
-    for cluster in clusters(focus) {
+    for cluster in clusters(focus, pauses) {
         let (first, first_target) = cluster[0];
         let current = keys[keys.len() - 1].1;
         let (start_ms, settled_ms) = move_window(first, ZOOM_IN_LEAD_MS);
@@ -173,8 +173,9 @@ fn camera_keys(focus: &[(&Event, Rect)], frame: Size) -> Vec<(f64, View)> {
             push_key(&mut keys, settled_ms, focus_view(next_target, frame));
         }
         let (last, last_target) = cluster[cluster.len() - 1];
-        push_key(&mut keys, last.until_ms() + HOLD_MS, focus_view(last_target, frame));
-        push_key(&mut keys, last.until_ms() + HOLD_MS + ZOOM_OUT_MS, overview(frame));
+        let end_ms = attention_end(last, pauses);
+        push_key(&mut keys, end_ms + HOLD_MS, focus_view(last_target, frame));
+        push_key(&mut keys, end_ms + HOLD_MS + ZOOM_OUT_MS, overview(frame));
     }
     keys
 }
@@ -188,11 +189,31 @@ fn move_window(event: &Event, lead_ms: f64) -> (f64, f64) {
     }
 }
 
-fn clusters<'a>(focus: &'a [(&'a Event, Rect)]) -> Vec<&'a [(&'a Event, Rect)]> {
+fn pauses(events: &[Event]) -> Vec<(f64, f64)> {
+    let mut pauses: Vec<(f64, f64)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Pause { at_ms, until_ms } => Some((*at_ms, *until_ms)),
+            _ => None,
+        })
+        .collect();
+    pauses.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pauses
+}
+
+/// When the viewer stops looking at an action: a scripted pause right after it is reading time.
+fn attention_end(event: &Event, pauses: &[(f64, f64)]) -> f64 {
+    pauses
+        .iter()
+        .filter(|(start, _)| *start >= event.at_ms())
+        .fold(event.until_ms(), |end, (start, until)| if start - end <= CLUSTER_GAP_MS { end.max(*until) } else { end })
+}
+
+fn clusters<'a>(focus: &'a [(&'a Event, Rect)], pauses: &[(f64, f64)]) -> Vec<&'a [(&'a Event, Rect)]> {
     let mut clusters = Vec::new();
     let mut start = 0;
     for i in 1..=focus.len() {
-        let ends = i == focus.len() || focus[i].0.at_ms() - focus[i - 1].0.until_ms() > CLUSTER_GAP_MS;
+        let ends = i == focus.len() || focus[i].0.at_ms() - attention_end(focus[i - 1].0, pauses) > CLUSTER_GAP_MS;
         if ends {
             clusters.push(&focus[start..i]);
             start = i;
@@ -428,6 +449,27 @@ mod tests {
         assert!(close(plan.cursor_at(3_200.0).x, 950.0), "the cursor moved to the dialog");
         let (cx, _) = plan.camera_at(2_100.0).center();
         assert!(close(cx, 950.0), "the camera left the click before the dialog appeared");
+    }
+
+    #[test]
+    fn holds_the_view_through_a_scripted_pause() {
+        let other = Rect { x: 300.0, y: 200.0, w: 100.0, h: 32.0 };
+        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 7_100.0 }, click(8_000.0, other)];
+        let plan = Plan::new(&events, 14_000.0, FRAME);
+
+        for t in [3_000.0, 5_000.0, 7_000.0] {
+            assert!(close(plan.camera_at(t).zoom(FRAME), MAX_ZOOM), "zoomed out at {t}");
+            assert!(close(plan.camera_at(t).center().0, 950.0), "panned away at {t}");
+        }
+    }
+
+    #[test]
+    fn holds_the_view_through_a_pause_after_the_last_action() {
+        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 7_100.0 }];
+        let plan = Plan::new(&events, 12_000.0, FRAME);
+
+        assert!(close(plan.camera_at(6_500.0).zoom(FRAME), MAX_ZOOM), "zoomed out during the pause");
+        assert_eq!(plan.camera_at(11_000.0).zoom(FRAME), 1.0);
     }
 
     #[test]
