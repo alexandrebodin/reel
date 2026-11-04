@@ -246,7 +246,8 @@ impl Camera {
 
 /// Decides the camera and the cursor together, because one rule ties them: the cursor only travels
 /// through what the viewer can see, so a target out of view means zooming out first. The camera
-/// comes back in once the click has landed, and stays still for anything already in view.
+/// comes back in once the click has landed, and stays still for anything already in view. Reading
+/// time gives way to the next move: a cursor that teleports looks broken, a shorter read does not.
 fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), frame: Size, style: &Style, cuts: &[Cut]) -> (Vec<ZoomSpan>, Vec<Move>) {
     let pauses = pauses(events);
     let mut actions: Vec<&Event> = events.iter().filter(|e| e.camera_frame().is_some()).collect();
@@ -255,11 +256,15 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
     let wide = overview(frame);
     let mut camera = Camera { zooms: Vec::new(), wide, shown: wide, free_from: 0.0, frame };
     let mut moves = Vec::new();
-    let (mut position, mut free_from) = (cursor_start, 0.0);
+    let (mut position, mut free_from, mut action_end) = (cursor_start, 0.0_f64, 0.0_f64);
     for (i, event) in actions.iter().enumerate() {
         let arrive_ms = event.at_ms() - CURSOR_ARRIVES_EARLY_MS;
-        let mut travel_ms = (arrive_ms - CURSOR_TRAVEL_MS).max(free_from);
         let target_hidden = event.cursor_target().is_some_and(|t| !in_view(camera.shown, t));
+        let needed_ms = if target_hidden && camera.shown != wide { CURSOR_TRAVEL_MS + UNZOOM_MS } else { CURSOR_TRAVEL_MS };
+        if event.cursor_target().is_some_and(|t| t.center() != position) {
+            free_from = free_from.min(arrive_ms - needed_ms).max(action_end);
+        }
+        let mut travel_ms = (arrive_ms - CURSOR_TRAVEL_MS).max(free_from);
         if camera.shown != wide && (target_hidden || played_ms(free_from, event.at_ms(), cuts) > CLUSTER_GAP_MS) {
             let start_ms = past_cuts((free_from + HOLD_MS).min(travel_ms - UNZOOM_MS).max(free_from), cuts);
             travel_ms = travel_ms.max(camera.move_to(start_ms, UNZOOM_MS, wide));
@@ -272,6 +277,7 @@ fn choreograph(events: &[Event], duration_ms: f64, cursor_start: (f64, f64), fra
             position = to;
         }
         let next = actions.get(i + 1).copied();
+        action_end = event.until_ms();
         free_from = attention_end(event, next, &pauses);
 
         if let Some(rect) = event.camera_frame() {

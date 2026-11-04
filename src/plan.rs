@@ -569,6 +569,30 @@ mod tests {
     }
 
     #[test]
+    fn gives_the_cursor_its_full_travel_when_a_click_comes_right_after_a_pause() {
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 6_000.0 }, click(6_040.0, far)];
+        let plan = plan(&events, 12_000.0);
+
+        let arrives = 6_040.0 - 120.0;
+        let early = plan.cursor_at(arrives - 300.0).x;
+        let late = plan.cursor_at(arrives - 100.0).x;
+        assert!(early < 900.0, "had not left 300 ms before arriving: {early}");
+        assert!(early > 100.0 && late < early, "not travelling: {early} then {late}");
+        assert!(close(plan.cursor_at(arrives - 900.0).x, 950.0), "left before it needed to");
+    }
+
+    #[test]
+    fn still_holds_the_view_for_most_of_a_pause_before_a_far_target() {
+        let far = Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 };
+        let events = [click(2_000.0, BUTTON), Event::Pause { at_ms: 2_100.0, until_ms: 6_000.0 }, click(6_040.0, far)];
+        let plan = plan(&events, 12_000.0);
+
+        assert!(close(plan.camera_at(4_500.0).zoom(FRAME), ZOOM), "zoomed out too early");
+        assert_eq!(plan.camera_at(6_040.0 - 120.0 - 650.0).zoom(FRAME), 1.0, "still zoomed in when the cursor set off");
+    }
+
+    #[test]
     fn has_the_cursor_on_the_target_at_every_click() {
         let a = Rect { x: 900.0, y: 500.0, w: 100.0, h: 32.0 };
         let b = Rect { x: 1_200.0, y: 760.0, w: 60.0, h: 32.0 };
