@@ -9,28 +9,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::events::{Event, Rect};
+use crate::screencast::Screencast;
 use crate::script::{Script, Step};
 use crate::style::Style;
 
 /// Runs one agent-browser command and returns its `data`.
 pub trait Browser {
     fn run(&mut self, args: &[&str], stdin: Option<&str>) -> Result<Value>;
+    fn start_recording(&mut self, video: &Path, size: [u32; 2], scale: u32, fps: u32) -> Result<()>;
+    fn stop_recording(&mut self) -> Result<()>;
 }
 
 pub struct AgentBrowser {
     session: String,
+    launch_args: String,
+    screencast: Option<Screencast>,
 }
 
 impl AgentBrowser {
-    pub fn new(session: &str) -> AgentBrowser {
-        AgentBrowser { session: session.to_string() }
+    pub fn new(session: &str, scale: u32) -> AgentBrowser {
+        // Emulating a device scale is not enough: Chrome's screencast then still sends 1x frames.
+        AgentBrowser { session: session.to_string(), launch_args: format!("--force-device-scale-factor={scale}"), screencast: None }
     }
 }
 
 impl Browser for AgentBrowser {
     fn run(&mut self, args: &[&str], stdin: Option<&str>) -> Result<Value> {
         let mut child = Command::new("agent-browser")
-            .args(["--session", &self.session, "--json"])
+            .args(["--session", &self.session, "--json", "--args", &self.launch_args])
             .args(args)
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
@@ -49,6 +55,19 @@ impl Browser for AgentBrowser {
             bail!("agent-browser {}: {}", args.join(" "), response["error"]);
         }
         Ok(response["data"].clone())
+    }
+
+    fn start_recording(&mut self, video: &Path, size: [u32; 2], scale: u32, fps: u32) -> Result<()> {
+        let cdp_url = self.run(&["get", "cdp-url"], None)?;
+        let cdp_url = cdp_url["cdpUrl"].as_str().context("reading the CDP address")?;
+        let page_url = self.run(&["get", "url"], None)?;
+        let page_url = page_url["url"].as_str().context("reading the page address")?;
+        self.screencast = Some(Screencast::start(cdp_url, page_url, size, scale, video, fps)?);
+        Ok(())
+    }
+
+    fn stop_recording(&mut self) -> Result<()> {
+        self.screencast.take().context("not recording")?.finish()
     }
 }
 
@@ -92,8 +111,6 @@ fn one() -> u32 {
 }
 
 pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing: &Pacing) -> Result<Recording> {
-    let video_arg = video.to_string_lossy().to_string();
-    let fps = script.fps.to_string();
     if let Some(state) = &script.state {
         sign_in(browser, state, &script.url)?;
     }
@@ -105,7 +122,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     }
     sleep(pacing.settle);
 
-    browser.run(&["record", "start", &video_arg, "--fps", &fps], None)?;
+    browser.start_recording(video, script.size, script.scale, script.fps)?;
     let start = Instant::now();
     let elapsed = || start.elapsed().as_secs_f64() * 1_000.0;
     sleep(pacing.settle);
@@ -116,7 +133,7 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     }
     sleep(pacing.settle);
     let duration_ms = elapsed();
-    browser.run(&["record", "stop"], None)?;
+    browser.stop_recording()?;
 
     Ok(Recording { video: video.to_path_buf(), size: script.size, scale: script.scale, fps: script.fps, duration_ms, events, style: script.style.clone() })
 }
@@ -347,6 +364,16 @@ mod tests {
                 } }));
             }
             Ok(json!({}))
+        }
+
+        fn start_recording(&mut self, _video: &Path, _size: [u32; 2], _scale: u32, _fps: u32) -> Result<()> {
+            self.commands.push("record start".into());
+            Ok(())
+        }
+
+        fn stop_recording(&mut self) -> Result<()> {
+            self.commands.push("record stop".into());
+            Ok(())
         }
     }
 

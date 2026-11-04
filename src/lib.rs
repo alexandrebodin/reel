@@ -2,6 +2,7 @@ pub mod capture;
 pub mod events;
 pub mod plan;
 pub mod render;
+pub mod screencast;
 pub mod script;
 pub mod style;
 
@@ -26,7 +27,7 @@ pub fn record(script_path: &Path, output: Option<PathBuf>, style_overrides: &[St
     let dir = dir.canonicalize()?;
     let video = dir.join("raw.mp4");
 
-    let mut browser = AgentBrowser::new(&format!("reel-{name}"));
+    let mut browser = AgentBrowser::new(&format!("reel-{name}"), script.scale);
     let captured = capture(&script, &mut browser, &video, &Pacing::default());
     let _ = browser.run(&["close"], None);
     let mut recording = captured?;
