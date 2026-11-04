@@ -81,9 +81,9 @@ pub fn capture(script: &Script, browser: &mut dyn Browser, video: &Path, pacing:
     let video_arg = video.to_string_lossy().to_string();
     let fps = script.fps.to_string();
     match &script.state {
-        Some(state) => browser.run(&["--state", &state.to_string_lossy(), "open", &script.url], None)?,
-        None => browser.run(&["open", &script.url], None)?,
-    };
+        Some(state) => navigate(browser, &["--state", &state.to_string_lossy(), "open", &script.url])?,
+        None => navigate(browser, &["open", &script.url])?,
+    }
     browser.run(&["set", "viewport", &script.size[0].to_string(), &script.size[1].to_string()], None)?;
     let mut last_action = Instant::now() - pacing.between_actions;
     for step in &script.setup {
@@ -146,9 +146,18 @@ fn perform(
             Ok(None)
         }
         Step::Goto { url } => {
-            browser.run(&["open", url], None)?;
+            navigate(browser, &["open", url])?;
             Ok(None)
         }
+    }
+}
+
+/// A dev server can keep a page loading past agent-browser's timeout; the next step that looks
+/// for an element decides whether the page is usable.
+fn navigate(browser: &mut dyn Browser, args: &[&str]) -> Result<()> {
+    match browser.run(args, None) {
+        Err(error) if error.to_string().contains("timed out") => Ok(()),
+        other => other.map(|_| ()),
     }
 }
 
@@ -156,7 +165,7 @@ fn perform(
 /// and returns where it sits in the viewport.
 fn locate(browser: &mut dyn Browser, target: &str) -> Result<(Rect, String)> {
     let script = format!("({LOCATE_JS})({})", serde_json::to_string(target)?);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let found = &browser.run(&["eval", "--stdin"], Some(&script))?["result"];
         if let (Some(id), Some(x), Some(y), Some(w), Some(h)) =
@@ -207,11 +216,15 @@ mod tests {
     #[derive(Default)]
     struct FakeBrowser {
         commands: Vec<String>,
+        slow_pages: bool,
     }
 
     impl Browser for FakeBrowser {
         fn run(&mut self, args: &[&str], _stdin: Option<&str>) -> Result<Value> {
             self.commands.push(args.join(" "));
+            if self.slow_pages && args.contains(&"open") {
+                bail!("Operation timed out. The page may still be loading or the element may not exist.");
+            }
             if args[0] == "eval" {
                 return Ok(json!({ "result": { "id": "abc", "x": 10.0, "y": 20.0, "w": 100.0, "h": 30.0 } }));
             }
@@ -262,6 +275,17 @@ mod tests {
         let start = browser.commands.iter().position(|c| c.starts_with("record start")).unwrap();
         let setup = browser.commands.iter().position(|c| c == "open about:setup").unwrap();
         assert!(setup < start);
+        assert_eq!(recording.events.len(), 1);
+    }
+
+    #[test]
+    fn keeps_going_when_a_page_is_still_loading_after_the_navigation_timeout() {
+        let mut browser = FakeBrowser { slow_pages: true, ..FakeBrowser::default() };
+        let mut demo = script(vec![Step::Goto { url: "about:next".into() }, Step::Click { target: "#go".into() }]);
+        demo.setup = vec![Step::Goto { url: "about:setup".into() }];
+
+        let recording = capture(&demo, &mut browser, Path::new("/tmp/raw.webm"), &no_pacing()).unwrap();
+
         assert_eq!(recording.events.len(), 1);
     }
 
