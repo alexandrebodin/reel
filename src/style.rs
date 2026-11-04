@@ -10,6 +10,42 @@ use serde_json::{Map, Value};
 pub struct Style {
     pub zoom: Zoom,
     pub background: Background,
+    pub cursor: CursorStyle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorLook {
+    WhiteArrow,
+    BlackArrow,
+    Dot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorMotion {
+    /// A slight arc with a quick start and stop, like a hand.
+    Natural,
+    /// A straight line with a gentle start and stop.
+    Smooth,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CursorStyle {
+    pub show: bool,
+    /// Multiplies the default size.
+    pub size: f64,
+    pub style: CursorLook,
+    pub motion: CursorMotion,
+    pub hide_when_idle: bool,
+    pub hide_when_typing: bool,
+}
+
+impl Default for CursorStyle {
+    fn default() -> CursorStyle {
+        CursorStyle { show: true, size: 1.0, style: CursorLook::WhiteArrow, motion: CursorMotion::Natural, hide_when_idle: false, hide_when_typing: false }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -175,6 +211,9 @@ impl Style {
         if !(1.0..=8.0).contains(&self.zoom.level) {
             bail!("zoom.level must be between 1 and 8, not {}", self.zoom.level);
         }
+        if !(0.25..=8.0).contains(&self.cursor.size) {
+            bail!("cursor.size must be between 0.25 and 8, not {}", self.cursor.size);
+        }
         let background = &self.background;
         if !(0.0..45.0).contains(&background.padding) {
             bail!("background.padding must be a percent below 45, not {}", background.padding);
@@ -269,6 +308,18 @@ mod tests {
         assert!(with(&["background.padding=44"]).is_ok());
         assert!(with(&["background.shadow=101"]).is_err());
         assert!(with(&["background.corners=51"]).is_err());
+    }
+
+    #[test]
+    fn reads_cursor_options() {
+        let style = with(&["cursor.size=2", "cursor.style=black_arrow", "cursor.motion=smooth", "cursor.hide_when_typing=true"]).unwrap();
+
+        assert_eq!(style.cursor.size, 2.0);
+        assert_eq!(style.cursor.style, CursorLook::BlackArrow);
+        assert_eq!(style.cursor.motion, CursorMotion::Smooth);
+        assert!(style.cursor.hide_when_typing);
+        assert!(with(&["cursor.size=0"]).is_err());
+        assert!(with(&["cursor.style=hand"]).is_err());
     }
 
     #[test]

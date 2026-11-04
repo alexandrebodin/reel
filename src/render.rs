@@ -12,7 +12,7 @@ use tiny_skia::{
 
 use crate::capture::Recording;
 use crate::plan::{Cursor, Plan, Ripple, Size, View};
-use crate::style::{Aspect, Background, Fill, Rgb, Style};
+use crate::style::{Aspect, Background, CursorLook, Fill, Rgb, Style};
 
 /// The output frame and where the video sits in it, in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,21 +111,34 @@ impl Compositor {
             }
         }
 
-        if let Some(cursor) = cursor {
+        if let Some(cursor) = cursor.filter(|c| self.style.cursor.show && c.opacity > 0.0) {
             let (x, y) = place(cursor.x, cursor.y);
-            let size = CURSOR_SIZE / 20.0 * self.density * magnification.powf(0.6) * (1.0 - 0.18 * cursor.pressed as f32);
-            let at = Transform::from_translate(x, y).pre_scale(size, size);
-            let mut shadow = Paint { anti_alias: true, ..Paint::default() };
-            shadow.set_color(Color::from_rgba8(0, 0, 0, 70));
-            out.fill_path(&self.arrow, &shadow, FillRule::Winding, at.post_translate(1.5 * size, 2.5 * size), None);
-            let mut body = Paint { anti_alias: true, ..Paint::default() };
-            body.set_color(Color::WHITE);
-            out.fill_path(&self.arrow, &body, FillRule::Winding, at, None);
-            let mut outline = Paint { anti_alias: true, ..Paint::default() };
-            outline.set_color(Color::from_rgba8(20, 20, 24, 255));
-            out.stroke_path(&self.arrow, &outline, &Stroke { width: 1.4, ..Stroke::default() }, at, None);
+            let size = CURSOR_SIZE / 20.0 * self.density * magnification.powf(0.6) * self.style.cursor.size as f32 * (1.0 - 0.18 * cursor.pressed as f32);
+            self.draw_cursor(&mut out, x, y, size, cursor.opacity as f32);
         }
         out
+    }
+
+    fn draw_cursor(&self, out: &mut Pixmap, x: f32, y: f32, size: f32, opacity: f32) {
+        let at = Transform::from_translate(x, y).pre_scale(size, size);
+        let paint = |r: u8, g: u8, b: u8, a: f32| {
+            let mut paint = Paint { anti_alias: true, ..Paint::default() };
+            paint.set_color(Color::from_rgba8(r, g, b, (a * opacity * 255.0) as u8));
+            paint
+        };
+        let (body, line) = match self.style.cursor.style {
+            CursorLook::WhiteArrow => (paint(255, 255, 255, 1.0), paint(20, 20, 24, 1.0)),
+            CursorLook::BlackArrow => (paint(16, 16, 18, 1.0), paint(255, 255, 255, 1.0)),
+            CursorLook::Dot => {
+                let Some(dot) = PathBuilder::from_circle(0.0, 0.0, 7.0) else { return };
+                out.fill_path(&dot, &paint(16, 16, 18, 0.72), FillRule::Winding, at, None);
+                out.stroke_path(&dot, &paint(255, 255, 255, 1.0), &Stroke { width: 1.4, ..Stroke::default() }, at, None);
+                return;
+            }
+        };
+        out.fill_path(&self.arrow, &paint(0, 0, 0, 0.27), FillRule::Winding, at.post_translate(1.5 * size, 2.5 * size), None);
+        out.fill_path(&self.arrow, &body, FillRule::Winding, at, None);
+        out.stroke_path(&self.arrow, &line, &Stroke { width: 1.4, ..Stroke::default() }, at, None);
     }
 }
 
@@ -302,6 +315,7 @@ pub fn plan_for(recording: &Recording) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::CursorStyle;
     use tiny_skia::Color;
 
     const RED: Rgb = Rgb([220, 30, 30]);
@@ -389,7 +403,7 @@ mod tests {
     fn draws_the_cursor_at_its_css_position_on_a_2x_frame() {
         let mut white = Pixmap::new(400, 200).unwrap();
         white.fill(Color::WHITE);
-        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0 };
+        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0 };
 
         let out = compositor([200, 100], 2, &flat(BLACK)).compose(&white, View { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, Some(cursor), &[]);
 
@@ -548,13 +562,66 @@ mod tests {
     fn draws_the_cursor_where_the_plan_puts_it() {
         let mut white = Pixmap::new(200, 100).unwrap();
         white.fill(Color::WHITE);
-        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0 };
+        let cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0 };
 
         let out = compositor([200, 100], 1, &flat(BLACK)).compose(&white, FULL, Some(cursor), &[]);
 
         let dark = (60..76).flat_map(|x| (30..56).map(move |y| (x, y))).filter(|&(x, y)| rgb(&out, x, y).0[0] < 128).count();
         assert!(dark > 10, "only {dark} dark pixels near the cursor");
         assert_eq!(rgb(&out, 150, 80), WHITE);
+    }
+
+    fn white_frame() -> Pixmap {
+        let mut white = Pixmap::new(200, 100).unwrap();
+        white.fill(Color::WHITE);
+        white
+    }
+
+    fn cursor_frame(cursor: CursorStyle, at: Cursor) -> Pixmap {
+        let style = Style { cursor, ..flat(BLACK) };
+        compositor([200, 100], 1, &style).compose(&white_frame(), FULL, Some(at), &[])
+    }
+
+    const SPOT: Cursor = Cursor { x: 60.0, y: 30.0, pressed: 0.0, opacity: 1.0 };
+
+    fn dark_pixels(out: &Pixmap) -> usize {
+        (0..200).flat_map(|x| (0..100).map(move |y| (x, y))).filter(|&(x, y)| rgb(out, x, y).0[0] < 128).count()
+    }
+
+    #[test]
+    fn draws_nothing_when_the_cursor_is_turned_off_or_faded_out() {
+        let off = cursor_frame(CursorStyle { show: false, ..CursorStyle::default() }, SPOT);
+        let faded = cursor_frame(CursorStyle::default(), Cursor { opacity: 0.0, ..SPOT });
+
+        assert_eq!(dark_pixels(&off), 0);
+        assert_eq!(dark_pixels(&faded), 0);
+    }
+
+    #[test]
+    fn scales_the_cursor_with_its_size() {
+        let normal = dark_pixels(&cursor_frame(CursorStyle::default(), SPOT));
+        let double = dark_pixels(&cursor_frame(CursorStyle { size: 2.0, ..CursorStyle::default() }, SPOT));
+
+        assert!(double > normal * 3 / 2, "{normal} then {double}");
+    }
+
+    #[test]
+    fn fills_a_black_arrow_dark_and_a_white_arrow_light() {
+        let inside = (62, 42);
+        let white = cursor_frame(CursorStyle::default(), SPOT);
+        let black = cursor_frame(CursorStyle { style: CursorLook::BlackArrow, ..CursorStyle::default() }, SPOT);
+
+        assert!(rgb(&white, inside.0, inside.1).0[0] > 200, "{:?}", rgb(&white, inside.0, inside.1));
+        assert!(rgb(&black, inside.0, inside.1).0[0] < 60, "{:?}", rgb(&black, inside.0, inside.1));
+    }
+
+    #[test]
+    fn centers_a_dot_on_the_cursor_position() {
+        let out = cursor_frame(CursorStyle { style: CursorLook::Dot, ..CursorStyle::default() }, SPOT);
+
+        assert!(rgb(&out, 60, 30).0[0] < 128, "center is {:?}", rgb(&out, 60, 30));
+        assert!(rgb(&out, 56, 30).0[0] < 128, "left of center is {:?}", rgb(&out, 56, 30));
+        assert_eq!(rgb(&out, 80, 30), WHITE);
     }
 
     #[test]

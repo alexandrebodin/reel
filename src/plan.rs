@@ -1,5 +1,5 @@
 use crate::events::{Event, Rect};
-use crate::style::Style;
+use crate::style::{CursorMotion, CursorStyle, Style};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -32,6 +32,8 @@ pub struct Cursor {
     pub y: f64,
     /// 0 when released, 1 while the button is down.
     pub pressed: f64,
+    /// 0 when hidden, 1 when fully shown.
+    pub opacity: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,6 +60,8 @@ const PRESS_LEAD_MS: f64 = 60.0;
 const PRESS_MS: f64 = 140.0;
 const RELEASE_MS: f64 = 80.0;
 const RIPPLE_MS: f64 = 500.0;
+const IDLE_BEFORE_HIDING_MS: f64 = 800.0;
+const FADE_MS: f64 = 180.0;
 const IDLE_EDGE_MS: f64 = 400.0;
 const IDLE_TARGET_MS: f64 = 600.0;
 const MIN_IDLE_SPEED: f64 = 3.0;
@@ -72,6 +76,8 @@ pub struct Plan {
     cursor_start: (f64, f64),
     moves: Vec<Move>,
     clicks: Vec<(f64, (f64, f64))>,
+    typing: Vec<(f64, f64)>,
+    cursor_style: CursorStyle,
 }
 
 struct Move {
@@ -98,6 +104,14 @@ impl Plan {
                     _ => None,
                 })
                 .collect(),
+            typing: events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Type { at_ms, until_ms, .. } => Some((*at_ms, *until_ms)),
+                    _ => None,
+                })
+                .collect(),
+            cursor_style: style.cursor.clone(),
         }
     }
 
@@ -126,13 +140,32 @@ impl Plan {
                 break;
             }
             if t_ms < m.end_ms {
-                position = curve(m.from, m.to, ease_in_out((t_ms - m.start_ms) / (m.end_ms - m.start_ms)));
+                let p = (t_ms - m.start_ms) / (m.end_ms - m.start_ms);
+                position = match self.cursor_style.motion {
+                    CursorMotion::Natural => curve(m.from, m.to, ease_in_out(p)),
+                    CursorMotion::Smooth => line(m.from, m.to, ease_sine(p)),
+                };
                 break;
             }
             position = m.to;
         }
         let pressed = self.clicks.iter().map(|(at, _)| press_amount(t_ms - at)).fold(0.0, f64::max);
-        Cursor { x: position.0, y: position.1, pressed }
+        Cursor { x: position.0, y: position.1, pressed, opacity: self.cursor_opacity(t_ms) }
+    }
+
+    fn cursor_opacity(&self, t_ms: f64) -> f64 {
+        let style = &self.cursor_style;
+        let mut opacity: f64 = 1.0;
+        if style.hide_when_idle {
+            let moving = self.moves.iter().map(|m| (m.start_ms, m.end_ms));
+            let clicking = self.clicks.iter().map(|(at, _)| (at - PRESS_LEAD_MS, at + PRESS_MS + RELEASE_MS));
+            opacity = moving.chain(clicking).map(|(from, to)| shown(t_ms, from, to + IDLE_BEFORE_HIDING_MS)).fold(0.0, f64::max);
+        }
+        if style.hide_when_typing {
+            let typing = self.typing.iter().map(|(from, to)| shown(t_ms, from + FADE_MS, *to)).fold(0.0, f64::max);
+            opacity = opacity.min(1.0 - typing);
+        }
+        opacity
     }
 
     pub fn ripples_at(&self, t_ms: f64) -> Vec<Ripple> {
@@ -272,6 +305,19 @@ fn press_amount(since_click_ms: f64) -> f64 {
     } else {
         1.0 - (d - PRESS_MS) / RELEASE_MS
     }
+}
+
+/// 1 from `from` to `to`, fading in just before and out just after.
+fn shown(t_ms: f64, from: f64, to: f64) -> f64 {
+    ((t_ms - (from - FADE_MS)) / FADE_MS).min(((to + FADE_MS) - t_ms) / FADE_MS).clamp(0.0, 1.0)
+}
+
+fn ease_sine(p: f64) -> f64 {
+    (1.0 - (p.clamp(0.0, 1.0) * std::f64::consts::PI).cos()) / 2.0
+}
+
+fn line(from: (f64, f64), to: (f64, f64), p: f64) -> (f64, f64) {
+    (from.0 + (to.0 - from.0) * p, from.1 + (to.1 - from.1) * p)
 }
 
 fn ease_in_out(p: f64) -> f64 {
@@ -607,6 +653,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn with_cursor(cursor: CursorStyle, events: &[Event], duration_ms: f64) -> Plan {
+        Plan::new(events, duration_ms, FRAME, &Style { cursor, ..Style::default() })
+    }
+
+    #[test]
+    fn moves_in_an_arc_when_natural_and_a_straight_line_when_smooth() {
+        let events = [click(2_000.0, BUTTON)];
+        let (start, end) = ((FRAME.w * 0.62, FRAME.h * 0.72), BUTTON.center());
+        let off_the_line = |plan: &Plan, t| {
+            let cursor = plan.cursor_at(t);
+            let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+            ((cursor.x - start.0) * dy - (cursor.y - start.1) * dx).abs() / (dx * dx + dy * dy).sqrt()
+        };
+
+        let smooth = with_cursor(CursorStyle { motion: CursorMotion::Smooth, ..CursorStyle::default() }, &events, 6_000.0);
+
+        assert!(off_the_line(&plan(&events, 6_000.0), 1_550.0) > 5.0);
+        assert!(off_the_line(&smooth, 1_550.0) < 0.01);
+        assert!(close(smooth.cursor_at(2_000.0).x, end.0) && close(smooth.cursor_at(2_000.0).y, end.1));
+    }
+
+    #[test]
+    fn stays_visible_unless_asked_to_hide() {
+        let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
+        let events = [Event::Type { at_ms: 1_000.0, until_ms: 3_000.0, target: field, frame: field }];
+        let plan = plan(&events, 20_000.0);
+
+        for t in [0.0, 2_000.0, 15_000.0] {
+            assert_eq!(plan.cursor_at(t).opacity, 1.0);
+        }
+    }
+
+    #[test]
+    fn hides_when_idle_and_returns_before_the_next_move() {
+        let events = [click(2_000.0, BUTTON), click(9_000.0, Rect { x: 40.0, y: 20.0, w: 100.0, h: 32.0 })];
+        let plan = with_cursor(CursorStyle { hide_when_idle: true, ..CursorStyle::default() }, &events, 12_000.0);
+
+        assert_eq!(plan.cursor_at(0.0).opacity, 0.0, "shown before anything moved");
+        assert_eq!(plan.cursor_at(1_700.0).opacity, 1.0, "hidden while moving");
+        assert_eq!(plan.cursor_at(2_000.0).opacity, 1.0, "hidden at the click");
+        assert_eq!(plan.cursor_at(2_600.0).opacity, 1.0, "hidden right after the click");
+        assert_eq!(plan.cursor_at(5_000.0).opacity, 0.0, "shown while idle");
+        assert_eq!(plan.cursor_at(8_500.0).opacity, 1.0, "hidden while moving to the next target");
+        assert_eq!(plan.cursor_at(9_000.0).opacity, 1.0, "hidden at the second click");
+        assert_eq!(plan.cursor_at(11_900.0).opacity, 0.0, "shown after the last click");
+    }
+
+    #[test]
+    fn shows_a_click_on_the_spot_it_is_already_on_when_hiding_idle() {
+        let events = [click(2_000.0, BUTTON), click(9_000.0, BUTTON)];
+        let plan = with_cursor(CursorStyle { hide_when_idle: true, ..CursorStyle::default() }, &events, 12_000.0);
+
+        assert_eq!(plan.cursor_at(6_000.0).opacity, 0.0);
+        assert_eq!(plan.cursor_at(9_000.0).opacity, 1.0);
+    }
+
+    #[test]
+    fn hides_while_typing_and_returns_after() {
+        let field = Rect { x: 600.0, y: 400.0, w: 500.0, h: 40.0 };
+        let events = [Event::Type { at_ms: 2_000.0, until_ms: 4_000.0, target: field, frame: field }];
+        let plan = with_cursor(CursorStyle { hide_when_typing: true, ..CursorStyle::default() }, &events, 8_000.0);
+
+        assert_eq!(plan.cursor_at(1_500.0).opacity, 1.0);
+        assert_eq!(plan.cursor_at(2_000.0).opacity, 1.0, "hidden as it arrived at the field");
+        assert_eq!(plan.cursor_at(3_000.0).opacity, 0.0);
+        assert_eq!(plan.cursor_at(5_000.0).opacity, 1.0);
     }
 
     #[test]
