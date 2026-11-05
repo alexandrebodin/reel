@@ -11,7 +11,7 @@ pub mod server;
 pub mod style;
 pub mod timeline;
 
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,9 +35,15 @@ pub fn record(script_path: &Path, output: Option<PathBuf>, style_overrides: &[St
     let dir = base.join("out").join(&name);
     fs::create_dir_all(&dir)?;
     let dir = dir.canonicalize()?;
+    let lock = fs::File::create(dir.join(".lock"))?;
+    match lock.try_lock() {
+        Err(TryLockError::WouldBlock) => bail!("{} is already being recorded: wait for that take to end", script_path.display()),
+        other => other?,
+    }
     let video = dir.join("raw.mp4");
 
-    let mut browser = AgentBrowser::new(&format!("reel-{name}"), script.scale);
+    // A session name reused by another take would reload that take's page under it.
+    let mut browser = AgentBrowser::new(&format!("reel-{name}-{}", std::process::id()), script.scale);
     let captured = capture(&script, &mut browser, &video, &Pacing::default());
     let _ = browser.run(&["close"], None);
     let mut recording = captured?;
