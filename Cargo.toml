@@ -4,7 +4,7 @@ default-members = ["."]
 
 [package]
 name = "reel"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Scripted browser demos rendered with auto zoom, cursor, click ripples and speed ramps"
 
